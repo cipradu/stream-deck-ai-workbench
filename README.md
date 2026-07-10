@@ -2,6 +2,10 @@
 
 A local macOS **Stream Deck plugin** that puts live AI‑tooling **usage** and account **balances** on your Stream Deck keys — subscription/plan usage for AI coding tools, and remaining balance or month‑to‑date spend for a range of AI API vendors — each with an at‑a‑glance gauge, reset countdown, and green/amber/red thresholds.
 
+![AI Workbench on a Stream Deck XL](assets/preview.jpg)
+
+*A fully configured Stream Deck XL running AI Workbench — sample data, not real account values.*
+
 > **Personal / educational project.** It is **not affiliated with, endorsed by, or supported by** any of the vendors it integrates with. It talks to each vendor's own APIs using **your own credentials**, and several providers rely on **undocumented endpoints** that can change or break at any time. See [Disclaimers](#disclaimers--legal) before using or distributing it.
 
 ---
