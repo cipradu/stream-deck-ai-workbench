@@ -1,0 +1,17 @@
+{
+  "name": "@ai-workbench/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Plain serializable TypeScript public contracts: action families, provider ids, credential classes, metrics, snapshots, display states, errors, severity, settings views, scheduler keys, and renderer inputs",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

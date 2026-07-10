@@ -1,0 +1,63 @@
+{
+  "Actions": [
+    {
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Icon": "assets/usage",
+      "Name": "Usage",
+      "PropertyInspectorPath": "ui/usage-display.html",
+      "States": [
+        {
+          "Image": "assets/usage-key",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Shows AI coding-plan usage (Claude Code, Codex, z.ai, MiniMax) for a chosen window, with a reset countdown and optional thresholds.",
+      "UUID": "com.blackice.ai-workbench.usage-display"
+    },
+    {
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Icon": "assets/balance",
+      "Name": "Balance",
+      "PropertyInspectorPath": "ui/balance-display.html",
+      "States": [
+        {
+          "Image": "assets/balance-key",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Shows an AI API vendor's remaining balance or current-period spend, with optional amber/red thresholds.",
+      "UUID": "com.blackice.ai-workbench.balance-display"
+    }
+  ],
+  "Author": "Black Ice",
+  "Category": "AI Workbench",
+  "CategoryIcon": "assets/category-icon",
+  "CodePath": "bin/plugin.js",
+  "Description": "Live AI-tooling usage and account balances on your Stream Deck keys — plan usage for Claude Code, Codex, z.ai, and MiniMax, plus remaining balance or spend for a range of AI API vendors.",
+  "Icon": "assets/plugin-icon",
+  "Name": "AI Workbench",
+  "Nodejs": {
+    "Version": "24"
+  },
+  "OS": [
+    {
+      "MinimumVersion": "14.0",
+      "Platform": "mac"
+    }
+  ],
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "7.1"
+  },
+  "URL": "https://github.com/cipradu/stream-deck-ai-workbench",
+  "UUID": "com.blackice.ai-workbench",
+  "Version": "0.1.0.0"
+}

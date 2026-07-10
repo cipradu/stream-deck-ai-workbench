@@ -1,0 +1,586 @@
+import { Clock, Effect, Option, Redacted, Schema } from "effect";
+
+import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
+import { MissingCredentials } from "@ai-workbench/errors";
+import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+
+import { createUsageProviderAdapterBinding } from "../../../binding-helpers.js";
+import {
+  schedulerFailureFromTagged,
+  type AdapterFetchFailure,
+  type EffectUsageSchedulerFetch,
+} from "../../../effect-fetch.js";
+import { abortSignalForScheduler } from "../../../live-http.js";
+import { missingCredentialsFetchFailure, noSourceConfigured } from "../../../provider-failures.js";
+import type {
+  ClaudeCodeCredentialResult,
+  CreateUsageProviderSourceFetchInput,
+  UsageProviderAdapterBinding,
+} from "../../../types.js";
+
+const providerId = "claude-code" as const;
+const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
+const CREDENTIAL_BOUNDARY = "provider-adapters";
+
+// The Fable usage category is the `limits[]` entry whose `kind` is
+// `weekly_scoped` and whose scoped model display name is exactly this. `scope.model.id` is null on
+// the wire, so the entry is selected by display name, not id.
+const FABLE_WEEKLY_SCOPED_KIND = "weekly_scoped";
+const FABLE_MODEL_DISPLAY_NAME = "Fable";
+
+const ClaudeCodeUsageResponseSchema = Schema.Struct({
+  // `utilization` is TOLERANT (optional + nullable): a transient malformed window (a missing or null
+  // utilization) degrades THAT window to per-window no-data in `usageWindowForResponse` instead of
+  // failing the WHOLE decode (which briefly blanked the key during credit-toggling). The 5h/7d happy
+  // path — a finite numeric utilization — is unchanged.
+  five_hour: Schema.optional(
+    Schema.Struct({
+      utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+      resets_at: Schema.optional(Schema.String),
+    }),
+  ),
+  seven_day: Schema.optional(
+    Schema.Struct({
+      utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+      resets_at: Schema.optional(Schema.String),
+    }),
+  ),
+  // Fable source: the OAuth usage response's `limits[]`. Deliberately
+  // TOLERANT on the shared decode — `Schema.Unknown` so ANY `limits` shape (or its absence) can NEVER
+  // fail the unchanged 5h/7d percentage decode (mirrors the Codex `credits` isolation; before
+  // this field existed `limits` was silently excess-ignored, so consuming it MUST stay unable to
+  // reject the response). The STRICT per-entry decode is isolated in `fableUsageForResponse` via
+  // `ClaudeCodeLimitSchema`, so a malformed entry fails SOFT to the Fable path's "not returned"
+  // no-data and never touches the 5h/7d path. Every other response field stays excess-ignored.
+  limits: Schema.optional(Schema.Unknown),
+  // Extra-usage SPEND source: the OAuth usage response's `spend`
+  // object. Same isolation ethos as `limits`/`credits`: TOLERANT `Schema.Unknown` on the shared
+  // decode so ANY `spend` shape (or its absence, or a bad sub-field) can NEVER fail the unchanged
+  // 5h/7d/fable decode (before this field existed `spend` was silently excess-ignored, so consuming
+  // it MUST stay unable to reject the response). The STRICT decode is isolated in
+  // `spendSnapshotValuesForResponse` via `ClaudeCodeSpendSchema`, so a malformed `spend` fails SOFT
+  // to the credit-spend path's "not returned" no-data and never touches the 5h/7d/fable path.
+  spend: Schema.optional(Schema.Unknown),
+});
+
+type ClaudeCodeUsageResponse = Schema.Schema.Type<typeof ClaudeCodeUsageResponseSchema>;
+
+// Strict, isolated decode of ONE `limits[]` entry, decoded SEPARATELY from
+// the tolerant shared `limits` field (same isolation ethos as the Codex credits/resets decodes): the
+// consumed fields are individually optional/nullable, and every other entry field (group, severity,
+// is_active, scope.surface, scope.model.id, ...) is excess-ignored. An entry that does not decode is
+// simply skipped by the scan, never a hard ValidationDrift.
+const ClaudeCodeLimitSchema = Schema.Struct({
+  kind: Schema.optional(Schema.String),
+  percent: Schema.optional(Schema.NullOr(Schema.Number)),
+  resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+  scope: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        model: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              display_name: Schema.optional(Schema.NullOr(Schema.String)),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+});
+const decodeClaudeCodeLimit = Schema.decodeUnknownOption(ClaudeCodeLimitSchema);
+
+// One money amount inside `spend` (used / limit / cap.money): minor units + exponent + ISO 4217
+// currency, every field individually optional/nullable so a partial money object degrades to
+// per-field no-data in `spendMoneyForSpend` rather than failing the whole spend decode.
+const ClaudeCodeSpendMoneySchema = Schema.Struct({
+  amount_minor: Schema.optional(Schema.NullOr(Schema.Number)),
+  currency: Schema.optional(Schema.NullOr(Schema.String)),
+  exponent: Schema.optional(Schema.NullOr(Schema.Number)),
+});
+
+// Strict, isolated decode of the `spend` object, decoded SEPARATELY
+// from the tolerant shared `spend` field (same isolation ethos as the Fable/credits decodes). Every
+// consumed field is individually optional/nullable so a present-but-partial spend still decodes; a
+// non-object spend (string/number/array) decodes to `Option.none` -> fail-soft "not returned"
+// no-data. `auto_reload` stays `Schema.Unknown` because its ON-shape is UNCONFIRMED (owner probes
+// only ever return `null`): decoding it strictly could reject a real spend, so it is interpreted
+// tolerantly in `autoReloadIsOn` instead. Every other `spend` field (balance, cap.credits, ...) is
+// excess-ignored.
+const ClaudeCodeSpendSchema = Schema.Struct({
+  enabled: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  disabled_reason: Schema.optional(Schema.NullOr(Schema.String)),
+  percent: Schema.optional(Schema.NullOr(Schema.Number)),
+  used: Schema.optional(Schema.NullOr(ClaudeCodeSpendMoneySchema)),
+  limit: Schema.optional(Schema.NullOr(ClaudeCodeSpendMoneySchema)),
+  cap: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        money: Schema.optional(Schema.NullOr(ClaudeCodeSpendMoneySchema)),
+      }),
+    ),
+  ),
+  auto_reload: Schema.optional(Schema.Unknown),
+});
+const decodeClaudeCodeSpend = Schema.decodeUnknownOption(ClaudeCodeSpendSchema);
+
+type ClaudeCodeSpend = Schema.Schema.Type<typeof ClaudeCodeSpendSchema>;
+
+const OUT_OF_CREDITS_REASON = "out_of_credits";
+
+type SpendState = "active" | "off" | "out-of-credits";
+
+/**
+ * Resolved credit-spend snapshot values. The active state carries
+ * the money detail (percent displayed, `usedMinor`/`capMinor` in a shared `exponent`, `currency`);
+ * the off / out-of-credits states carry only the state + the auto-reload flag. `autoReloadOn` is
+ * carried for every state but only the out-of-credits render consumes it.
+ */
+type SpendSnapshotValues =
+  | {
+      readonly spendState: "active";
+      readonly autoReloadOn: boolean;
+      readonly percent: number;
+      readonly usedMinor: number;
+      readonly capMinor: number;
+      readonly currency: string;
+      readonly exponent: number;
+    }
+  | {
+      readonly spendState: "off" | "out-of-credits";
+      readonly autoReloadOn: boolean;
+    };
+
+type ClaudeCodeCredentialReasonCode = Extract<ClaudeCodeCredentialResult, { readonly ok: false }>["reasonCode"];
+
+/**
+ * The local Keychain credential read, normalized and with the plain access token wrapped in
+ * `Redacted` at the instant of the read. The plain string never flows past `normalizeCredentialRead`.
+ */
+type ClaudeCodeCredentialRead =
+  | { readonly ok: true; readonly token: Redacted.Redacted<string>; readonly expiresAt?: number }
+  | { readonly ok: false; readonly reasonCode: ClaudeCodeCredentialReasonCode };
+
+export const claudeCodeUsageProviderModule = {
+  providerId,
+  createBinding(capability: ProviderCapabilityMetadata): UsageProviderAdapterBinding {
+    return createUsageProviderAdapterBinding(providerId, capability);
+  },
+  // Effect-native HYBRID source fetch: the
+  // local-source (Keychain) + HTTP Usage variant of the Effect recipe, and the reference the
+  // codex adapter reuses. It reads the local Claude Code OAuth credential, wraps the
+  // plain access token in `Redacted` IMMEDIATELY on read (the plain token never flows past the
+  // read->wrap point), builds the OAuth usage request with the raw token at the
+  // `authorization: Bearer ...` header (the SINGLE `Redacted.value` unwrap), decodes at the
+  // source via `requestJsonSchema` (schemaBodyJson, ONE attempt per HTTP call, NO scheduler
+  // backoff), and yields the plain normalized usage snapshot. Two pieces of PROVIDER AUTH logic
+  // are preserved verbatim from the old working adapter and are NOT scheduler retry:
+  // (1) a proactive re-read of a stale-`expiresAt` token before the first call, and (2) a
+  // one-shot credential re-read + retry on a 401. Both share ONE re-read budget: a proactive
+  // re-read spends it, so a later 401 does not re-read again. The scheduler remains the single
+  // retry owner; the Effect-native scheduler consumes this adapter Effect directly (no Promise
+  // bridge on the live path).
+  createSourceFetchEffect(input: CreateUsageProviderSourceFetchInput): EffectUsageSchedulerFetch {
+    const readCredential = input.localSources?.claudeCode?.readCredential;
+    if (readCredential === undefined) {
+      return () =>
+        Effect.fail<AdapterFetchFailure>({
+          failure: noSourceConfigured("usage-claude-source-reader-missing").failure,
+        });
+    }
+
+    const baseUrl = input.baseUrl;
+    const now = input.now;
+
+    return (request) =>
+      Effect.gen(function* () {
+        const window = request.keyParts.windowOrPeriod;
+        if (window !== "five-hour" && window !== "seven-day" && window !== "fable" && window !== "credit-spend") {
+          return yield* Effect.fail<AdapterFetchFailure>({
+            failure: noSourceConfigured("usage-claude-window-not-returned").failure,
+          });
+        }
+
+        const signal = abortSignalForScheduler(request.signal);
+        const usageUrl = new URL("/api/oauth/usage", baseUrl);
+
+        // Reads the local credential once, wrapping the plain token in `Redacted` immediately. A
+        // rejected read (defensive — the Keychain reader resolves ok/not-ok in practice) fails
+        // with a sanitized tagged error carrying no cause. Re-running this Effect
+        // re-invokes the reader, which is exactly what the proactive/refresh re-reads need.
+        const readOnce = Effect.tryPromise({
+          try: () => readCredential(),
+          catch: () => credentialReadRejected(),
+        }).pipe(Effect.map(normalizeCredentialRead));
+
+        // Proactive stale-`expiresAt` re-read BEFORE the first call. Shares the single re-read
+        // budget with the 401 refresh below; a stale re-read spends the budget (`reRead`). Time
+        // comes from Effect `Clock` unless an explicit `now` seam is injected; the
+        // `??` keeps the clock read out of the hot path when the earlier conditions short-circuit.
+        let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+        let reRead = false;
+        if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= (now?.() ?? (yield* Clock.currentTimeMillis))) {
+          credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+          reRead = true;
+        }
+        if (!credential.ok) {
+          return yield* Effect.fail<AdapterFetchFailure>({
+            failure: missingCredentialsFetchFailure(credential.reasonCode).failure,
+          });
+        }
+
+        const attempt = (token: Redacted.Redacted<string>) =>
+          requestJsonSchema(
+            { url: usageUrl, headers: claudeCodeHeaders(token), signal },
+            ClaudeCodeUsageResponseSchema,
+            { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
+          );
+
+        // First attempt + one-shot auth refresh. The 401 refresh is PROVIDER AUTH logic, not
+        // scheduler backoff: each HTTP call is still ONE `requestJsonSchema` attempt. It fires
+        // only when the re-read budget is unspent (`!reRead`), mirroring the old adapter's
+        // `!reRead` guard exactly; a spent budget lets a 401 surface unchanged.
+        const decoded = reRead
+          ? attempt(credential.token)
+          : attempt(credential.token).pipe(
+              Effect.catchTag("UnauthorizedExpired", () =>
+                readOnce.pipe(
+                  Effect.flatMap((refreshed) =>
+                    refreshed.ok
+                      ? attempt(refreshed.token)
+                      : Effect.fail(missingCredentialsError(refreshed.reasonCode)),
+                  ),
+                ),
+              ),
+            );
+
+        const body = yield* decoded.pipe(Effect.mapError(schedulerFailureFromTagged));
+
+        // Credit-spend sources from the SAME response's `spend`
+        // object and returns a DIFFERENT snapshot shape (usage-spend money, not usage-percent), so it
+        // branches EARLY here and returns before the 5h/7d/fable percentage path — leaving that path
+        // byte-identical. A malformed/absent `spend` (or an active state with missing money) fails
+        // SOFT to the credit-spend path's own sanitized "not returned" no-data, never a broken gauge.
+        if (window === "credit-spend") {
+          const spend = spendSnapshotValuesForResponse(body);
+          if (spend === undefined) {
+            return yield* Effect.fail<AdapterFetchFailure>({
+              failure: noSourceConfigured("usage-claude-credit-spend-not-returned").failure,
+            });
+          }
+          return claudeCodeSpendSnapshot(spend, now?.() ?? request.startedAtEpochMs);
+        }
+
+        // Fable sources from `limits[]` (weekly_scoped + the Fable model display name); 5h/7d source
+        // from the named window objects. Both resolve to the SAME plain usage-percent snapshot below.
+        // Fable carries its OWN sanitized "not returned" reason code so an absent Fable entry reads as
+        // no-data, never a defaulted 0.
+        const matched = window === "fable" ? fableUsageForResponse(body) : usageWindowForResponse(body, window);
+        if (matched === undefined) {
+          return yield* Effect.fail<AdapterFetchFailure>({
+            failure: noSourceConfigured(
+              window === "fable" ? "usage-claude-fable-not-returned" : "usage-claude-window-not-returned",
+            ).failure,
+          });
+        }
+
+        const snapshot: NormalizedSnapshot = {
+          familyId: "usage",
+          providerId,
+          metricKind: "usage-percent",
+          metricDirection: "upper-bound",
+          unit: "percent",
+          coverage: {
+            kind: "rolling-window",
+            window,
+          },
+          value: matched.value,
+          fetchedAtEpochMs: now?.() ?? request.startedAtEpochMs,
+          ...(matched.resetsAtEpochMs === undefined ? {} : { resetsAtEpochMs: matched.resetsAtEpochMs }),
+        };
+        return snapshot;
+      });
+  },
+} as const;
+
+function normalizeCredentialRead(result: ClaudeCodeCredentialResult): ClaudeCodeCredentialRead {
+  if (!result.ok) {
+    return { ok: false, reasonCode: result.reasonCode };
+  }
+
+  // Wrap the plain access token in `Redacted` at the instant of the read; the plain string does
+  // not flow beyond this point.
+  return {
+    ok: true,
+    token: Redacted.make(result.accessToken),
+    ...(result.expiresAt === undefined ? {} : { expiresAt: result.expiresAt }),
+  };
+}
+
+function claudeCodeHeaders(token: Redacted.Redacted<string>): Readonly<Record<string, string>> {
+  return {
+    // The SINGLE `Redacted.value` unwrap site for this adapter — the auth header. Invoked once
+    // per actual HTTP call (the refresh re-reads + re-wraps), never logged or copied elsewhere.
+    authorization: `Bearer ${Redacted.value(token)}`,
+    "anthropic-beta": ANTHROPIC_BETA_HEADER,
+  };
+}
+
+/**
+ * A resolved-but-not-ok credential read, expressed as the shared `MissingCredentials` tagged
+ * error so the HTTP-attempt + refresh sub-pipe stays in one error channel. The mapped plain
+ * `SanitizedFailure` is identical to `missingCredentialsFetchFailure(reasonCode)`.
+ */
+function missingCredentialsError(reasonCode: ClaudeCodeCredentialReasonCode): MissingCredentials {
+  return new MissingCredentials({ reasonCode, boundary: CREDENTIAL_BOUNDARY, providerFailureClass: "credentials" });
+}
+
+/**
+ * A rejected credential read (defensive — the Keychain reader resolves ok/not-ok in practice).
+ * Classified as missing-credentials with no cause so nothing sensitive can leak.
+ */
+function credentialReadRejected(): MissingCredentials {
+  return new MissingCredentials({
+    reasonCode: "claude-code-credential-read-failed",
+    boundary: CREDENTIAL_BOUNDARY,
+    providerFailureClass: "credentials",
+  });
+}
+
+function usageWindowForResponse(
+  response: ClaudeCodeUsageResponse,
+  window: UsageWindowId,
+): { readonly value: number; readonly resetsAtEpochMs?: number } | undefined {
+  const rawWindow = window === "five-hour" ? response.five_hour : response.seven_day;
+  // A missing window, or a missing/null/non-finite `utilization` (now tolerated by the schema), is
+  // per-window no-data — never a defaulted 0, and never a whole-response failure. The typeof guard
+  // both rejects null/undefined and narrows `utilization` to a finite number for the value below.
+  const utilization = rawWindow?.utilization;
+  if (typeof utilization !== "number" || !Number.isFinite(utilization)) {
+    return undefined;
+  }
+
+  const parsedResetsAt = rawWindow?.resets_at === undefined ? Number.NaN : Date.parse(rawWindow.resets_at);
+  return {
+    value: utilization,
+    ...(Number.isFinite(parsedResetsAt) && parsedResetsAt > 0 ? { resetsAtEpochMs: parsedResetsAt } : {}),
+  };
+}
+
+/**
+ * Fable usage from the tolerant `limits[]`: the entry whose `kind` is
+ * `weekly_scoped` and whose `scope.model.display_name` is exactly "Fable" (selected by display name
+ * because `scope.model.id` is null on the wire). Its `percent` is the weekly Fable usage % (a finite
+ * number; any other shape — including a present entry with a null/non-finite percent — is no-data,
+ * never a defaulted 0). `resets_at` is null while inactive (no countdown) and an ISO string while
+ * active, normalized to epoch ms via `Date.parse` exactly like the 5h/7d window `resets_at`. An
+ * absent Fable entry returns undefined; the caller maps that to the sanitized "fable not returned"
+ * no-data.
+ */
+function fableUsageForResponse(
+  response: ClaudeCodeUsageResponse,
+): { readonly value: number; readonly resetsAtEpochMs?: number } | undefined {
+  if (!Array.isArray(response.limits)) {
+    return undefined;
+  }
+
+  for (const raw of response.limits) {
+    const limit = Option.getOrUndefined(decodeClaudeCodeLimit(raw));
+    if (
+      limit === undefined ||
+      limit.kind !== FABLE_WEEKLY_SCOPED_KIND ||
+      limit.scope?.model?.display_name !== FABLE_MODEL_DISPLAY_NAME
+    ) {
+      continue;
+    }
+
+    // The Fable entry is present: a finite `percent` is the value, else per-category no-data.
+    if (typeof limit.percent !== "number" || !Number.isFinite(limit.percent)) {
+      return undefined;
+    }
+
+    const parsedResetsAt = typeof limit.resets_at === "string" ? Date.parse(limit.resets_at) : Number.NaN;
+    return {
+      value: limit.percent,
+      ...(Number.isFinite(parsedResetsAt) && parsedResetsAt > 0 ? { resetsAtEpochMs: parsedResetsAt } : {}),
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Resolves the credit-spend snapshot values from the tolerant
+ * `spend` field via the isolated strict `ClaudeCodeSpendSchema`. A non-object/absent `spend` decodes
+ * to `Option.none` -> undefined -> fail-soft "not returned" no-data. The state machine reads
+ * `enabled`/`disabled_reason`; only the ACTIVE state extracts money, and an active state whose
+ * used/cap money is missing or non-finite ALSO returns undefined (fail soft — never a broken gauge).
+ */
+function spendSnapshotValuesForResponse(response: ClaudeCodeUsageResponse): SpendSnapshotValues | undefined {
+  const spend = Option.getOrUndefined(decodeClaudeCodeSpend(response.spend));
+  if (spend === undefined) {
+    return undefined;
+  }
+
+  const autoReloadOn = autoReloadIsOn(spend.auto_reload);
+  const state = spendStateFor(spend);
+  if (state !== "active") {
+    return { spendState: state, autoReloadOn };
+  }
+
+  const money = spendMoneyForSpend(spend);
+  if (money === undefined) {
+    return undefined;
+  }
+
+  return {
+    spendState: "active",
+    autoReloadOn,
+    percent: money.percent,
+    usedMinor: money.usedMinor,
+    capMinor: money.capMinor,
+    currency: money.currency,
+    exponent: money.exponent,
+  };
+}
+
+/**
+ * The spend state machine (owner-confirmed): `active` when the extra-usage toggle is on
+ * (`enabled === true`); `out-of-credits` when depleted (`disabled_reason === "out_of_credits"`,
+ * which also wins if `enabled` is missing); otherwise `off`. Active always wins so a momentarily
+ * depleted-but-enabled account still reads as actively spending.
+ */
+function spendStateFor(spend: ClaudeCodeSpend): SpendState {
+  if (spend.enabled === true) {
+    return "active";
+  }
+  if (spend.disabled_reason === OUT_OF_CREDITS_REASON) {
+    return "out-of-credits";
+  }
+  return "off";
+}
+
+/**
+ * Active-state money: `used` must carry a finite minor amount, a
+ * finite exponent, and a non-empty currency; the cap is `limit ?? cap.money` (first with a finite
+ * minor amount). A single `exponent` (from `used`) is applied to both amounts — the confirmed data
+ * shares it — and a cap reporting its OWN finite, DISAGREEING exponent fails soft rather than
+ * misrender the cap. `percent` is `spend.percent` when finite, else derived from used/cap so the
+ * gauge still reflects the real ratio. Any missing/non-finite piece returns undefined -> no-data.
+ */
+function spendMoneyForSpend(spend: ClaudeCodeSpend): {
+  readonly percent: number;
+  readonly usedMinor: number;
+  readonly capMinor: number;
+  readonly currency: string;
+  readonly exponent: number;
+} | undefined {
+  const used = spend.used;
+  if (used === null || used === undefined) {
+    return undefined;
+  }
+  const usedMinor = used.amount_minor;
+  const exponent = used.exponent;
+  const currency = used.currency;
+  if (
+    typeof usedMinor !== "number" ||
+    !Number.isFinite(usedMinor) ||
+    typeof exponent !== "number" ||
+    !Number.isFinite(exponent) ||
+    typeof currency !== "string" ||
+    currency.length === 0
+  ) {
+    return undefined;
+  }
+
+  const cap = capMinorForSpend(spend);
+  if (cap === undefined) {
+    return undefined;
+  }
+  if (typeof cap.exponent === "number" && Number.isFinite(cap.exponent) && cap.exponent !== exponent) {
+    return undefined;
+  }
+
+  const percent =
+    typeof spend.percent === "number" && Number.isFinite(spend.percent)
+      ? spend.percent
+      : cap.amountMinor > 0
+        ? (usedMinor / cap.amountMinor) * 100
+        : 0;
+
+  return { percent, usedMinor, capMinor: cap.amountMinor, currency, exponent };
+}
+
+/**
+ * Resolves the spend cap minor amount (and its own exponent, if present) from `limit ?? cap.money`
+ * (owner order), taking the first source with a finite `amount_minor`. Returns undefined when
+ * neither source carries a finite cap amount.
+ */
+function capMinorForSpend(spend: ClaudeCodeSpend): { readonly amountMinor: number; readonly exponent: number | null | undefined } | undefined {
+  for (const source of [spend.limit, spend.cap?.money]) {
+    if (source !== null && source !== undefined && typeof source.amount_minor === "number" && Number.isFinite(source.amount_minor)) {
+      return { amountMinor: source.amount_minor, exponent: source.exponent };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Auto-reload heuristic (UNVERIFIED — review: unverified-pending-observation). The ON-shape is
+ * unconfirmed: owner probes only ever return `null` (off). So `spend.auto_reload` is decoded
+ * tolerantly (`Schema.Unknown`) and interpreted here: a bare `true`, or a non-null object that does
+ * not explicitly carry `enabled: false`, is treated as ON (the out-of-credits render turns red — the
+ * imminent-auto-charge burn condition); `null` / absent / `false` / any other primitive / an
+ * unrecognized shape is OFF (fail safe, never crash).
+ */
+function autoReloadIsOn(value: unknown): boolean {
+  if (value === true) {
+    return true;
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return (value as { readonly enabled?: unknown }).enabled !== false;
+  }
+  return false;
+}
+
+/**
+ * Builds the credit-spend snapshot. The active snapshot carries the
+ * money detail (base `value` is the money spent, matching the `money` unit); the off/out-of-credits
+ * status snapshot carries only the state + auto-reload flag with an inert `value` of 0 (never
+ * displayed — the renderer shows a neutral status word, and severity is not evaluated).
+ */
+function claudeCodeSpendSnapshot(values: SpendSnapshotValues, fetchedAtEpochMs: number): NormalizedSnapshot {
+  if (values.spendState === "active") {
+    return {
+      familyId: "usage",
+      providerId,
+      metricKind: "usage-spend",
+      metricDirection: "upper-bound",
+      unit: "money",
+      coverage: { kind: "current-period" },
+      value: values.usedMinor / 10 ** values.exponent,
+      fetchedAtEpochMs,
+      spendState: "active",
+      autoReloadOn: values.autoReloadOn,
+      percent: values.percent,
+      usedMinor: values.usedMinor,
+      capMinor: values.capMinor,
+      currency: values.currency,
+      exponent: values.exponent,
+    };
+  }
+
+  return {
+    familyId: "usage",
+    providerId,
+    metricKind: "usage-spend",
+    metricDirection: "upper-bound",
+    unit: "money",
+    coverage: { kind: "current-period" },
+    value: 0,
+    fetchedAtEpochMs,
+    spendState: values.spendState,
+    autoReloadOn: values.autoReloadOn,
+  };
+}

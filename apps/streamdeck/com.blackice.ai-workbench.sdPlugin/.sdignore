@@ -1,0 +1,6 @@
+bin/*.d.ts
+bin/*.d.ts.map
+assets/sources/
+logs/
+property-inspector/
+.dev-build

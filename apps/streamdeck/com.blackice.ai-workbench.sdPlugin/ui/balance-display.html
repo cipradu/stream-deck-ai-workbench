@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>Balance Display Settings</title>
+	<script src="sdpi-components.js"></script>
+</head>
+<body>
+	<sdpi-item label="Vendor">
+		<sdpi-select setting="vendor" placeholder="Anthropic (default)">
+			<option value="anthropic">Anthropic</option>
+			<option value="openai">OpenAI</option>
+			<option value="moonshot">Moonshot</option>
+			<option value="deepseek">DeepSeek</option>
+			<option value="tavily">Tavily</option>
+			<option value="exa">Exa</option>
+			<option value="deepgram">Deepgram</option>
+			<option value="jina">Jina</option>
+			<option value="fal">Fal.AI</option>
+			<option value="elevenlabs">ElevenLabs</option>
+			<option value="runpod">RunPod</option>
+			<option value="speechmatics">Speechmatics</option>
+		</sdpi-select>
+	</sdpi-item>
+
+	<!-- `global` persists to Stream Deck's ENCRYPTED GLOBAL settings, nested under
+	     balanceApiKeys.<vendor> — keys must never enter per-action settings. One field per
+	     vendor; exactly the selected vendor's field is visible. -->
+	<sdpi-item class="balance-key" label="Anthropic Admin API Key" id="key-anthropic" style="display: none">
+		<sdpi-password setting="balanceApiKeys.anthropic" global placeholder="sk-ant-admin-…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="OpenAI Admin Key" id="key-openai" style="display: none">
+		<sdpi-password setting="balanceApiKeys.openai" global placeholder="sk-admin-…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Moonshot Platform Key" id="key-moonshot" style="display: none">
+		<sdpi-password setting="balanceApiKeys.moonshot" global placeholder="open-platform key (NOT a Kimi Code key)"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="DeepSeek API Key" id="key-deepseek" style="display: none">
+		<sdpi-password setting="balanceApiKeys.deepseek" global placeholder="sk-…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Tavily API Key" id="key-tavily" style="display: none">
+		<sdpi-password setting="balanceApiKeys.tavily" global placeholder="tvly-…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Exa Service API Key" id="key-exa" style="display: none">
+		<sdpi-password setting="balanceApiKeys.exa" global placeholder="team-management service key"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Deepgram Project Key" id="key-deepgram" style="display: none">
+		<sdpi-password setting="balanceApiKeys.deepgram" global placeholder="project-scoped key"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Jina API Key" id="key-jina" style="display: none">
+		<sdpi-password setting="balanceApiKeys.jina" global placeholder="jina_…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="fal.ai Admin API Key" id="key-fal" style="display: none">
+		<sdpi-password setting="balanceApiKeys.fal" global placeholder="fal admin/scope key"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="ElevenLabs API Key" id="key-elevenlabs" style="display: none">
+		<sdpi-password setting="balanceApiKeys.elevenlabs" global placeholder="xi-…"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="RunPod API Key" id="key-runpod" style="display: none">
+		<sdpi-password setting="balanceApiKeys.runpod" global placeholder="RunPod API key"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item class="balance-key" label="Speechmatics API Key" id="key-speechmatics" style="display: none">
+		<sdpi-password setting="balanceApiKeys.speechmatics" global placeholder="Speechmatics key"></sdpi-password>
+	</sdpi-item>
+
+	<!-- Warn/critical floors for EVERY vendor (each independently optional). The threshold
+	     DIRECTION is the provider's metric direction: remaining vendors fire at-or-below the
+	     floor, spend/used vendors fire at-or-above it. Labels carry the vendor's unit and the
+	     direction word, set per vendor by the script. -->
+	<sdpi-item class="floors" id="floor-warn" label="Turn AMBER below" style="display: none">
+		<sdpi-textfield setting="warnFloor" type="number" placeholder="optional"></sdpi-textfield>
+	</sdpi-item>
+	<sdpi-item class="floors" id="floor-critical" label="Turn RED below" style="display: none">
+		<sdpi-textfield setting="criticalFloor" type="number" placeholder="optional"></sdpi-textfield>
+	</sdpi-item>
+
+	<sdpi-item class="interval" label="Refresh (s)" style="display: none">
+		<sdpi-textfield setting="intervalSeconds" type="number" placeholder="600 (min 60)"></sdpi-textfield>
+	</sdpi-item>
+
+	<script>
+		// Vendor capability copy mirrors the provider registry's presentation metadata
+		// (old plugin setting vocabulary and copy) — keep the two in lockstep.
+		const VENDOR_META = {
+			anthropic: { mode: "spend", unit: "USD" },
+			openai: { mode: "spend", unit: "USD" },
+			moonshot: { mode: "balance", unit: "USD" },
+			deepseek: { mode: "balance", unit: "USD" },
+			tavily: { mode: "balance", unit: "credits" },
+			exa: { mode: "spend", unit: "USD" },
+			deepgram: { mode: "balance", unit: "USD" },
+			jina: { mode: "balance", unit: "tokens" },
+			fal: { mode: "balance", unit: "USD" },
+			elevenlabs: { mode: "balance", unit: "chars" },
+			runpod: { mode: "spend", unit: "USD" },
+			speechmatics: { mode: "spend", unit: "hrs" },
+		};
+
+		const vendorSelect = document.querySelector('sdpi-select[setting="vendor"]');
+
+		function show(el, visible) {
+			el.style.display = visible ? "" : "none";
+		}
+
+		function syncVendorControls() {
+			const vendor = Object.hasOwn(VENDOR_META, vendorSelect.value) ? vendorSelect.value : "anthropic";
+			const meta = VENDOR_META[vendor];
+
+			// Field labels are direction-aware from the vendor's metric direction so the numbers
+			// are unambiguous: remaining vendors fire BELOW the floor, spend/used vendors ABOVE it.
+			const floorDirectionWord = meta.mode === "balance" ? "below" : "above";
+			document.getElementById("floor-warn").setAttribute("label", `Turn AMBER ${floorDirectionWord} (${meta.unit})`);
+			document.getElementById("floor-critical").setAttribute("label", `Turn RED ${floorDirectionWord} (${meta.unit})`);
+
+			// Exactly the selected vendor's key field is visible.
+			for (const item of document.querySelectorAll(".balance-key")) {
+				show(item, item.id === `key-${vendor}`);
+			}
+			// Floors are configurable for EVERY vendor; the central severity engine applies each
+			// floor in the provider's metric direction (below for remaining, above for spend/used).
+			for (const item of document.querySelectorAll(".floors")) {
+				show(item, true);
+			}
+			for (const item of document.querySelectorAll(".interval")) {
+				show(item, true);
+			}
+		}
+
+		// `valuechange` fires both on the initial settings load and on every user change.
+		vendorSelect.addEventListener("valuechange", syncVendorControls);
+		syncVendorControls();
+	</script>
+</body>
+</html>

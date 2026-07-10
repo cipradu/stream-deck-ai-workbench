@@ -1,0 +1,21 @@
+{
+  "name": "@ai-workbench/logging",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Central log sanitizer, structured sanitized event contract, and future Stream Deck sink interface",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "effect": "3.21.4"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

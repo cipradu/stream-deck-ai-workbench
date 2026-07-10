@@ -1,0 +1,26 @@
+{
+  "name": "@ai-workbench/action-usage",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Usage action-family catalog, source-gated scheduler output, and display-model assembly",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "@ai-workbench/display": "workspace:*",
+    "@ai-workbench/errors": "workspace:*",
+    "@ai-workbench/provider-adapters": "workspace:*",
+    "@ai-workbench/provider-registry": "workspace:*",
+    "@ai-workbench/scheduler": "workspace:*",
+    "@ai-workbench/settings": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

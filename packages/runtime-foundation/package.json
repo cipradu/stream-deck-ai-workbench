@@ -1,0 +1,20 @@
+{
+  "name": "@ai-workbench/runtime-foundation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Effect runtime composition, bridges, and resource scopes",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "effect": "3.21.4"
+  }
+}

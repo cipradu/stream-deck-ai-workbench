@@ -1,0 +1,24 @@
+{
+  "name": "@ai-workbench/settings",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Central Stream Deck settings, credential profile, and Property Inspector payload boundary",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "@ai-workbench/errors": "workspace:*",
+    "@ai-workbench/provider-registry": "workspace:*",
+    "@ai-workbench/validation": "workspace:*",
+    "effect": "3.21.4"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

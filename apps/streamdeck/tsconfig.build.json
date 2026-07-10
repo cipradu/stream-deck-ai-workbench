@@ -1,0 +1,9 @@
+{
+  "extends": "../../tooling/typescript/tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "com.blackice.ai-workbench.sdPlugin/bin"
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "ai-workbench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI Workbench Stream Deck plugin workspace (Effect runtime foundation)",
+  "packageManager": "pnpm@11.10.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run build"
+  },
+  "devDependencies": {
+    "@elgato/cli": "1.7.4",
+    "@rollup/plugin-commonjs": "29.0.3",
+    "@rollup/plugin-node-resolve": "16.0.3",
+    "@rollup/plugin-terser": "1.0.0",
+    "@rollup/plugin-typescript": "12.3.0",
+    "@types/node": "24.13.2",
+    "rollup": "4.62.2",
+    "tslib": "2.8.1",
+    "typescript": "6.0.3",
+    "vitest": "3.2.6"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": ["msgpackr-extract"]
+  }
+}

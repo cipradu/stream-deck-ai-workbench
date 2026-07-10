@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>Usage Display Settings</title>
+	<script src="sdpi-components.js"></script>
+</head>
+<body>
+	<sdpi-item label="Provider">
+		<sdpi-select setting="provider" placeholder="Claude Code (default)">
+			<option value="claude">Claude Code</option>
+			<option value="codex">Codex</option>
+			<option value="zai">Z.AI</option>
+			<option value="minimax">MiniMax</option>
+		</sdpi-select>
+	</sdpi-item>
+
+	<sdpi-item label="Window">
+		<sdpi-select setting="window" placeholder="5-hour (default)">
+			<option value="five_hour">5-hour</option>
+			<option value="weekly">Weekly</option>
+		</sdpi-select>
+	</sdpi-item>
+
+	<!-- `global` persists to Stream Deck's ENCRYPTED GLOBAL settings — keys must never enter
+	     per-action settings (those export to plaintext profiles). Exactly the selected
+	     API-key provider's field is visible; local-source providers (Claude Code, Codex) have none. -->
+	<sdpi-item label="Z.AI API Key" id="zai-key-item" style="display: none">
+		<sdpi-password setting="zaiApiKey" global placeholder="paste your z.ai API key"></sdpi-password>
+	</sdpi-item>
+	<sdpi-item label="MiniMax API Key" id="minimax-key-item" style="display: none">
+		<sdpi-password setting="minimaxApiKey" global placeholder="paste your MiniMax API key"></sdpi-password>
+	</sdpi-item>
+
+	<!-- The Used %/Remaining % toggle applies to the percentage windows only; it is hidden for the
+	     absolute lower-bound Codex "credits"/"resets" categories and the claude-code "credit-spend"
+	     spend guard (none of which read usageDisplayMode). -->
+	<sdpi-item label="Display" id="display-mode-item">
+		<sdpi-select setting="displayMode" placeholder="Used % (default)">
+			<option value="used">Used %</option>
+			<option value="remaining">Remaining %</option>
+		</sdpi-select>
+	</sdpi-item>
+
+	<!-- Optional warn/critical FLOORS for the categories whose severity is user-driven (each bound is
+	     independently optional). The lower-bound Codex "credits"/"resets" categories fire when the value
+	     drops TO the floor ("credits" on the remaining count, "resets" on the days until the earliest
+	     reset-credit expiry); the upper-bound claude-code "credit-spend" guard fires when the money spent
+	     rises ABOVE an absolute dollar threshold. The label wording and unit are set per category by the
+	     script below. Shown ONLY when such a category is selected; the percentage windows use the built-in
+	     registry defaults and show no floor fields. -->
+	<sdpi-item class="category-floors" id="floor-warn" label="Turn AMBER below" style="display: none">
+		<sdpi-textfield setting="warnFloor" type="number" placeholder="optional"></sdpi-textfield>
+	</sdpi-item>
+	<sdpi-item class="category-floors" id="floor-critical" label="Turn RED below" style="display: none">
+		<sdpi-textfield setting="criticalFloor" type="number" placeholder="optional"></sdpi-textfield>
+	</sdpi-item>
+
+	<sdpi-item label="Refresh (s)">
+		<sdpi-textfield setting="intervalSeconds" type="number" placeholder="600 (min 60)"></sdpi-textfield>
+	</sdpi-item>
+
+	<script>
+		// The window options derive from the selected provider's declared windows. This map
+		// mirrors the provider registry's supportedWindows (old plugin setting vocabulary) —
+		// keep the two in lockstep. A persisted window invalid for the new provider normalizes
+		// centrally on save.
+		const WINDOW_OPTIONS = {
+			claude: [["five_hour", "5-hour"], ["weekly", "Weekly"], ["fable", "Fable"], ["credit-spend", "Credits"]],
+			codex: [["five_hour", "5-hour"], ["weekly", "Weekly"], ["credits", "Credits"], ["resets", "Resets"]],
+			zai: [["five_hour", "5-hour"], ["mcp_monthly", "MCP tools (monthly)"]],
+			minimax: [["five_hour", "5-hour"], ["weekly", "Weekly"]],
+		};
+
+		// API-key providers and their PI key fields (local-source providers have none).
+		const KEY_ITEMS = { zai: "zai-key-item", minimax: "minimax-key-item" };
+
+		// Per-provider/window user-floor categories, shown ONLY when the matching category is selected.
+		// The lower-bound Codex "credits"/"resets" categories fire at-or-BELOW a floor ("credits" on the
+		// remaining count, "resets" on the DAYS of reset-credit runway). The claude-code "credit-spend"
+		// category is UPPER-BOUND: it fires when the money SPENT rises ABOVE an absolute dollar amount (the
+		// label reads "exceeds amount" — no currency word or symbol; the key shows a plain "$"). Every other
+		// provider/window is an upper-bound percentage that uses the built-in registry defaults and shows
+		// no floor fields.
+		const FLOOR_CATEGORIES = {
+			codex: { credits: { unit: "credits", fires: "below" }, resets: { unit: "days", fires: "below" } },
+			claude: { "credit-spend": { fires: "exceeds" } },
+		};
+
+		const providerSelect = document.querySelector('sdpi-select[setting="provider"]');
+		const windowSelect = document.querySelector('sdpi-select[setting="window"]');
+
+		// Resolve the selected provider to a known WINDOW_OPTIONS/FLOOR_CATEGORIES key (the same default
+		// the window-list population uses). The floor-category check must key on this, never a raw or
+		// transient providerSelect.value that could miss and wrongly hide the floor fields.
+		function resolvedProvider() {
+			return Object.hasOwn(WINDOW_OPTIONS, providerSelect.value) ? providerSelect.value : "claude";
+		}
+
+		function syncCategoryControls() {
+			const category = (FLOOR_CATEGORIES[resolvedProvider()] || {})[windowSelect.value];
+			const isFloorCategory = category !== undefined;
+			for (const item of document.querySelectorAll(".category-floors")) {
+				item.style.display = isFloorCategory ? "" : "none";
+			}
+			if (isFloorCategory) {
+				// Direction-aware wording: the upper-bound spend guard fires when spend EXCEEDS the entered
+				// amount (no currency word — plain amount in the account's dollars); a lower-bound remaining
+				// count / days-of-runway fires BELOW the floor.
+				const warnLabel =
+					category.fires === "exceeds"
+						? "Turn AMBER when spend exceeds amount"
+						: `Turn AMBER below (${category.unit})`;
+				const criticalLabel =
+					category.fires === "exceeds"
+						? "Turn RED when spend exceeds amount"
+						: `Turn RED below (${category.unit})`;
+				document.getElementById("floor-warn").setAttribute("label", warnLabel);
+				document.getElementById("floor-critical").setAttribute("label", criticalLabel);
+			}
+			// The Used %/Remaining % display toggle is inert for the absolute credits/resets/credit-spend
+			// values (their display paths hardcode their labels and never read usageDisplayMode), so hide
+			// it for a floor category and keep it visible for every percentage window.
+			document.getElementById("display-mode-item").style.display = isFloorCategory ? "none" : "";
+		}
+
+		function syncProviderDependentControls() {
+			const provider = resolvedProvider();
+			for (const [keyProvider, itemId] of Object.entries(KEY_ITEMS)) {
+				document.getElementById(itemId).style.display = provider === keyProvider ? "" : "none";
+			}
+
+			const options = WINDOW_OPTIONS[provider];
+			const current = Array.from(windowSelect.querySelectorAll("option"), (o) => o.value);
+			// Repopulate only when the window set actually changed (avoid churning the component's
+			// mutation observer), but ALWAYS re-sync the category-dependent controls afterwards.
+			if (current.length !== options.length || current.some((value, i) => value !== options[i][0])) {
+				// Destructive remove+re-add drops the sdpi-select's current selection, which intermittently
+				// hides the floor fields (the reported flicker). Capture the persisted window value and
+				// restore it once the new option set is in place, when it is still valid for this provider.
+				const preserved = windowSelect.value;
+				for (const stale of windowSelect.querySelectorAll("option")) {
+					stale.remove();
+				}
+				for (const [value, label] of options) {
+					const option = document.createElement("option");
+					option.value = value;
+					option.textContent = label;
+					windowSelect.append(option);
+				}
+				if (preserved && options.some(([value]) => value === preserved) && windowSelect.value !== preserved) {
+					windowSelect.value = preserved;
+				}
+			}
+			syncCategoryControls();
+		}
+
+		// `valuechange` fires both on the initial settings load and on every user change. Provider
+		// changes repopulate the window list; window changes only re-evaluate the floor-category
+		// controls (floor fields + the inert display-mode toggle).
+		providerSelect.addEventListener("valuechange", syncProviderDependentControls);
+		windowSelect.addEventListener("valuechange", syncCategoryControls);
+		syncProviderDependentControls();
+	</script>
+</body>
+</html>

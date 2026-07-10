@@ -1,0 +1,21 @@
+{
+  "name": "@ai-workbench/errors",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared sanitized error contract: typed categories, retryability, display states, diagnostics, and provider failure mapping",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "effect": "3.21.4"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

@@ -1,0 +1,43 @@
+# AI Workbench pnpm workspace — install-safety and member-layout policy.
+packages:
+  - packages/*
+  - apps/*
+  - tooling/*
+
+# Enforce root package.json engines against the local runtime.
+engineStrict: true
+
+# Dependency build scripts are blocked by default; unapproved build scripts are a
+# hard install error (pnpm 11 default, made explicit here: policy is defined before
+# the first install).
+strictDepBuilds: true
+
+# Deliberate allow-list: which transitive dependencies may run install-time build
+# scripts. esbuild (via vitest) is allowed. msgpackr-extract (via the Stream Deck
+# SDK) is explicitly NOT built — its native accelerator is optional and msgpackr
+# falls back to pure JS. Under strictDepBuilds every build-script dependency must be
+# decided true/false here, or the install fails.
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: false
+
+# Supply-chain delay gate: resolve only versions published at least 7 days ago
+# (units are minutes). All approved dev-dependency pins are older than this window.
+minimumReleaseAge: 10080
+
+# Trust-policy hardening: dependency trust metadata must not downgrade across
+# installs under the install-safety baseline.
+trustPolicy: no-downgrade
+
+# Exotic transitive sources are blocked; any direct non-registry source remains
+# an explicit owner-approved dependency decision.
+blockExoticSubdeps: true
+
+# Package-manager version self-management: pnpm 11 honors the root package.json
+# "packageManager" pin by default. The pnpm 10 "managePackageManagerVersions"
+# setting no longer exists in pnpm 11; pin enforcement is controlled by "pmOnFail"
+# (default "download" auto-switches to the pinned pnpm; "ignore" would opt out),
+# deliberately left at its default so the pin stays enforced.
+
+# The default isolated linker and declared-dependency behavior are kept.
+# No shamefullyHoist or other hoisting escape hatches.

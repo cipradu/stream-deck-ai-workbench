@@ -1,0 +1,21 @@
+{
+  "name": "@ai-workbench/validation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Effect Schema edge parsing helpers that return plain results with sanitized diagnostics",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/errors": "workspace:*",
+    "effect": "3.21.4"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

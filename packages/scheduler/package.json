@@ -1,0 +1,24 @@
+{
+  "name": "@ai-workbench/scheduler",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Central retry, refresh, backoff, single-flight, and stale-cache policy",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "@ai-workbench/errors": "workspace:*",
+    "@ai-workbench/http": "workspace:*",
+    "@ai-workbench/settings": "workspace:*",
+    "effect": "3.21.4"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

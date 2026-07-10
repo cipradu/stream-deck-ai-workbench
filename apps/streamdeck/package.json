@@ -1,0 +1,33 @@
+{
+  "name": "@ai-workbench/streamdeck",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stream Deck SDK shell and composition root for AI Workbench",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./com.blackice.ai-workbench.sdPlugin/bin/index.d.ts",
+      "default": "./com.blackice.ai-workbench.sdPlugin/bin/plugin.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "rm -rf com.blackice.ai-workbench.sdPlugin/bin && tsc -p tsconfig.build.json --emitDeclarationOnly && rollup -c",
+    "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.blackice.ai-workbench\""
+  },
+  "dependencies": {
+    "@ai-workbench/action-balance": "workspace:*",
+    "@ai-workbench/action-usage": "workspace:*",
+    "@ai-workbench/contracts": "workspace:*",
+    "@ai-workbench/display": "workspace:*",
+    "@ai-workbench/errors": "workspace:*",
+    "@ai-workbench/http": "workspace:*",
+    "@ai-workbench/logging": "workspace:*",
+    "@ai-workbench/provider-adapters": "workspace:*",
+    "@ai-workbench/runtime-foundation": "workspace:*",
+    "@ai-workbench/scheduler": "workspace:*",
+    "@ai-workbench/settings": "workspace:*",
+    "@elgato/streamdeck": "2.1.0",
+    "effect": "3.21.4"
+  }
+}
