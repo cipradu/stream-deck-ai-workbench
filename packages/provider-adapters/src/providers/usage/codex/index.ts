@@ -2,7 +2,7 @@ import { Effect, Option, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
 import { MissingCredentials } from "@ai-workbench/errors";
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { createUsageProviderAdapterBinding } from "../../../binding-helpers.js";
@@ -11,6 +11,7 @@ import {
   type AdapterFetchFailure,
   type EffectUsageSchedulerFetch,
 } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { abortSignalForScheduler } from "../../../live-http.js";
 import { missingCredentialsFetchFailure, noSourceConfigured } from "../../../provider-failures.js";
 import type {
@@ -179,7 +180,7 @@ export const codexUsageProviderModule = {
         if (window === "resets") {
           const resetsUrl = new URL("/backend-api/wham/rate-limit-reset-credits", baseUrl);
           const attemptResets = (cred: CodexCredentialReadOk) =>
-            requestJsonSchema(
+            governedRequestJsonSchema(
               { url: resetsUrl, headers: codexResetsHeaders(cred.accessToken, cred.accountId), signal },
               CodexResetCreditsResponseSchema,
               { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
@@ -211,7 +212,7 @@ export const codexUsageProviderModule = {
         }
 
         const attempt = (cred: CodexCredentialReadOk) =>
-          requestJsonSchema(
+          governedRequestJsonSchema(
             { url: usageUrl, headers: codexHeaders(cred.accessToken, cred.accountId), signal },
             CodexUsageResponseSchema,
             { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },

@@ -1,15 +1,20 @@
 import {
   METRIC_KIND_DIRECTION,
   METRIC_KIND_UNIT,
+  DEFAULT_RATE_LIMIT_DOMAIN,
   type ActionFamilyId,
+  type AcceptedCoordinationEvidence,
   type CoverageKind,
+  type CoordinationEvidence,
   type CredentialClass,
   type DisplayState,
   type DisplayUnit,
   type ImplementationStatus,
   type MetricDirection,
   type MetricKind,
+  type NoCoordinationEvidence,
   type ProviderId,
+  type ResolvedProviderCoordinationPolicy,
   type UsageWindowId,
 } from "@ai-workbench/contracts";
 
@@ -137,6 +142,15 @@ export interface ProviderCapabilityMetadata {
   readonly openDecision?: RegistryOpenDecision;
 }
 
+/**
+ * Authoritative catalog metadata with the internal policy resolved at the
+ * registry boundary. Read-only consumers can continue to depend on the
+ * narrower `ProviderCapabilityMetadata` shape when they do not need policy.
+ */
+export interface ResolvedProviderCapabilityMetadata extends ProviderCapabilityMetadata {
+  readonly coordinationPolicy: ResolvedProviderCoordinationPolicy;
+}
+
 /** Effective metric metadata for one capability category, with direction/unit derived from `metricKind`. */
 export interface ResolvedCapabilityMetric {
   readonly metricKind: MetricKind;
@@ -173,7 +187,7 @@ export function resolveCapabilityMetricForWindow(
 export interface ProviderRegistryEntry<Id extends string = ProviderId> {
   readonly providerId: Id;
   readonly productLabel: string;
-  readonly capabilities: readonly ProviderCapabilityMetadata[];
+  readonly capabilities: readonly ResolvedProviderCapabilityMetadata[];
 }
 
 export interface ImplementationStatusBehavior {
@@ -209,13 +223,130 @@ export const IMPLEMENTATION_STATUS_BEHAVIOR: Readonly<Record<ImplementationStatu
   },
 } as const;
 
-type CapabilityInput = Omit<ProviderCapabilityMetadata, "displayUnit" | "metricDirection">;
+type CapabilityInput = Omit<ResolvedProviderCapabilityMetadata, "displayUnit" | "metricDirection" | "coordinationPolicy"> & {
+  readonly coordinationPolicy?: unknown;
+};
 
-function capability(input: CapabilityInput): ProviderCapabilityMetadata {
+export const DEFAULT_PROVIDER_COORDINATION_POLICY = {
+  rateLimitDomain: DEFAULT_RATE_LIMIT_DOMAIN,
+  sourceIdentity: "adapter-declared",
+  sourceSharing: "not-declared",
+  rateLimitDomainEvidence: { status: "not-required" },
+  sourceSharingEvidence: { status: "not-required" },
+} as const satisfies ResolvedProviderCoordinationPolicy;
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function isNoCoordinationEvidence(value: unknown): value is NoCoordinationEvidence {
+  return isRecord(value) && hasOnlyKeys(value, ["status"]) && value.status === "not-required";
+}
+
+function isAcceptedCoordinationEvidence(value: unknown): value is AcceptedCoordinationEvidence {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["status", "source"]) &&
+    value.status === "accepted" &&
+    (value.source === "primary-source" || value.source === "local-source" || value.source === "owner-approved-sanitized-probe")
+  );
+}
+
+function isSafeCoordinationLabel(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(value);
+}
+
+function invalidProviderCoordinationPolicy(): never {
+  throw new Error("Invalid provider coordination policy");
+}
+
+function resolveRateLimitDomain(value: unknown): {
+  readonly domain: string;
+  readonly evidence: CoordinationEvidence;
+} {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "domain", "evidence"])) {
+    return invalidProviderCoordinationPolicy();
+  }
+
+  const declaration = value as unknown as { readonly kind?: unknown; readonly domain?: unknown; readonly evidence?: unknown };
+  if (
+    declaration.kind === "provider-profile" &&
+    declaration.domain === DEFAULT_RATE_LIMIT_DOMAIN &&
+    isNoCoordinationEvidence(declaration.evidence)
+  ) {
+    return { domain: DEFAULT_RATE_LIMIT_DOMAIN, evidence: declaration.evidence };
+  }
+
+  if (
+    declaration.kind === "evidence-backed" &&
+    isSafeCoordinationLabel(declaration.domain) &&
+    declaration.domain !== DEFAULT_RATE_LIMIT_DOMAIN &&
+    isAcceptedCoordinationEvidence(declaration.evidence)
+  ) {
+    return { domain: declaration.domain, evidence: declaration.evidence };
+  }
+
+  return invalidProviderCoordinationPolicy();
+}
+
+function resolveSourceSharing(value: unknown): {
+  readonly kind: ResolvedProviderCoordinationPolicy["sourceSharing"];
+  readonly evidence: CoordinationEvidence;
+} {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "evidence"])) {
+    return invalidProviderCoordinationPolicy();
+  }
+
+  const declaration = value as unknown as { readonly kind?: unknown; readonly evidence?: unknown };
+  if (declaration.kind === "not-declared" && isNoCoordinationEvidence(declaration.evidence)) {
+    return { kind: declaration.kind, evidence: declaration.evidence };
+  }
+
+  if (declaration.kind === "fan-out" && isAcceptedCoordinationEvidence(declaration.evidence)) {
+    return { kind: declaration.kind, evidence: declaration.evidence };
+  }
+
+  return invalidProviderCoordinationPolicy();
+}
+
+/**
+ * Validates static coordination metadata at the catalog boundary. The error
+ * intentionally contains no rejected declaration values.
+ */
+export function resolveProviderCoordinationPolicy(
+  declaration: unknown | undefined,
+): ResolvedProviderCoordinationPolicy {
+  if (declaration === undefined) {
+    return DEFAULT_PROVIDER_COORDINATION_POLICY;
+  }
+
+  if (!isRecord(declaration) || !hasOnlyKeys(declaration, ["rateLimitDomain", "sourceSharing"])) {
+    return invalidProviderCoordinationPolicy();
+  }
+
+  const rateLimitDomain = resolveRateLimitDomain(declaration.rateLimitDomain);
+  const sourceSharing = resolveSourceSharing(declaration.sourceSharing);
   return {
-    ...input,
-    metricDirection: METRIC_KIND_DIRECTION[input.metricKind],
-    displayUnit: METRIC_KIND_UNIT[input.metricKind],
+    rateLimitDomain: rateLimitDomain.domain,
+    sourceIdentity: "adapter-declared",
+    sourceSharing: sourceSharing.kind,
+    rateLimitDomainEvidence: rateLimitDomain.evidence,
+    sourceSharingEvidence: sourceSharing.evidence,
+  };
+}
+
+function capability(input: CapabilityInput): ResolvedProviderCapabilityMetadata {
+  const { coordinationPolicy, ...metadata } = input;
+  return {
+    ...metadata,
+    coordinationPolicy: resolveProviderCoordinationPolicy(coordinationPolicy),
+    metricDirection: METRIC_KIND_DIRECTION[metadata.metricKind],
+    displayUnit: METRIC_KIND_UNIT[metadata.metricKind],
   };
 }
 
@@ -259,13 +390,14 @@ function usageCapability(input: {
   readonly implementationStatus: ImplementationStatus;
   readonly sourceProofStatus: SourceProofStatus;
   readonly supportedWindows: readonly UsageWindowId[];
+  readonly coordinationPolicy?: unknown;
   readonly credentialClasses: readonly CredentialClass[];
   readonly requiredSettings: readonly ProviderSettingRequirement[];
   readonly categoryMetrics?: Readonly<Partial<Record<UsageWindowId, CapabilityCategoryMetric>>>;
   readonly presentation?: ProviderPresentationMetadata;
   readonly unavailableReason?: string;
   readonly openDecision?: RegistryOpenDecision;
-}): ProviderCapabilityMetadata {
+}): ResolvedProviderCapabilityMetadata {
   return capability({
     actionFamilyId: "usage",
     adapterBindingId: input.adapterBindingId,
@@ -279,6 +411,7 @@ function usageCapability(input: {
     coverageKind: "rolling-window",
     supportedWindows: input.supportedWindows,
     severityStrategy: usageSeverity,
+    ...(input.coordinationPolicy === undefined ? {} : { coordinationPolicy: input.coordinationPolicy }),
     ...(input.categoryMetrics === undefined ? {} : { categoryMetrics: input.categoryMetrics }),
     ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
     ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
@@ -299,7 +432,7 @@ function balanceCapability(input: {
   readonly severityStrategy: SeverityStrategy;
   readonly presentation?: ProviderPresentationMetadata;
   readonly unavailableReason?: string;
-}): ProviderCapabilityMetadata {
+}): ResolvedProviderCapabilityMetadata {
   return capability({
     actionFamilyId: "balance",
     adapterBindingId: input.adapterBindingId,
@@ -345,6 +478,17 @@ export const PROVIDER_REGISTRY = [
         // but upper-bound: more spent is worse). The internal id is `credit-spend`, NOT `credits`
         // (Codex owns the `credits` count pool) so the two never clash. Only claude-code declares it.
         supportedWindows: ["five-hour", "seven-day", "fable", "credit-spend"],
+        coordinationPolicy: {
+          rateLimitDomain: {
+            kind: "provider-profile",
+            domain: "provider-profile",
+            evidence: { status: "not-required" },
+          },
+          sourceSharing: {
+            kind: "fan-out",
+            evidence: { status: "accepted", source: "local-source" },
+          },
+        },
         credentialClasses: localSourceCredential,
         requiredSettings: localSourceSettings,
         categoryMetrics: {

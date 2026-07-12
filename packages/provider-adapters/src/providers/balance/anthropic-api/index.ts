@@ -1,6 +1,6 @@
 import { Effect, Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import {
@@ -15,6 +15,7 @@ import {
 import { createBalanceSourceFetchEffect } from "../../../balance-source-fetch.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import type { EffectBalanceSchedulerFetch } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { semanticValidationFailure } from "../../../provider-failures.js";
 import type {
   BalanceProviderAdapterBinding,
@@ -73,7 +74,7 @@ export const anthropicApiBalanceProviderModule = {
               url.searchParams.set("page", nextPage);
             }
 
-            const pageBody = yield* requestJsonSchema(
+            const pageBody = yield* governedRequestJsonSchema(
               {
                 url,
                 headers: {

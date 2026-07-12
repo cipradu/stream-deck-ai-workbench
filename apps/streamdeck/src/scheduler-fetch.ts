@@ -18,6 +18,7 @@ import {
   createSourceGatedBalanceFetchEffect,
   createSourceGatedUsageFetchEffect,
   createUsageProviderSourceFetchEffect,
+  type AdapterSourceFlightRuntimeCapability,
   type UsageProviderLocalSourceReaders,
 } from "@ai-workbench/provider-adapters";
 import type { SchedulerEffectFetch } from "@ai-workbench/scheduler";
@@ -30,6 +31,7 @@ import { writeShellLog } from "./logging.js";
 
 export interface CreateSchedulerFetchOptions {
   readonly readGlobalSettings: () => Promise<unknown>;
+  readonly sourceFlightRuntime: AdapterSourceFlightRuntimeCapability;
   readonly httpClientLayer?: typeof fetchHttpClientLayer;
   readonly localSources?: UsageProviderLocalSourceReaders;
   readonly logSink?: StreamDeckLogSink;
@@ -167,9 +169,13 @@ function createSchedulerFetchWithoutLogging(
     if (!resolved.ok) {
       return sanitizedFailureFetch(resolved.failure);
     }
+    const rateLimitDomain = resolved.value.capability.coordinationPolicy.rateLimitDomain;
     const sourceFetch = createUsageProviderSourceFetchEffect({
       providerId: resolved.value.providerId,
       baseUrl: USAGE_PROVIDER_BASE_URLS[resolved.value.providerId],
+      sourceFlightRuntime: options.sourceFlightRuntime,
+      credentialProfileId: settings.schedulerKeyParts.credentialProfileId,
+      rateLimitDomain,
       localSources: options.localSources ?? defaultLocalSources,
       resolveCredential: async () =>
         resolveCredentialMaterialFromGlobalSettings({
@@ -197,9 +203,13 @@ function createSchedulerFetchWithoutLogging(
   if (!resolved.ok) {
     return sanitizedFailureFetch(resolved.failure);
   }
+  const rateLimitDomain = resolved.value.capability.coordinationPolicy.rateLimitDomain;
   const sourceFetch = createBalanceProviderSourceFetchEffect({
     providerId: resolved.value.providerId,
     baseUrl: BALANCE_PROVIDER_BASE_URLS[resolved.value.providerId],
+    sourceFlightRuntime: options.sourceFlightRuntime,
+    credentialProfileId: settings.schedulerKeyParts.credentialProfileId,
+    rateLimitDomain,
     resolveCredential: async () =>
       resolveCredentialMaterialFromGlobalSettings({
         actionSettings: settings,

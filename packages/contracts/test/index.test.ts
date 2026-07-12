@@ -27,5 +27,8 @@ describe("@ai-workbench/contracts index surface", () => {
     expect(contracts.REFRESH_INTERVAL_MIN_SECONDS).toBeDefined();
     expect(contracts.REFRESH_INTERVAL_MAX_SECONDS).toBeDefined();
     expect(typeof contracts.serializeSchedulerKey).toBe("function");
+    expect(contracts.DEFAULT_RATE_LIMIT_DOMAIN).toBe("provider-profile");
+    expect(typeof contracts.serializeRateLimitScope).toBe("function");
+    expect(typeof contracts.serializeSourceRequestIdentity).toBe("function");
   });
 });

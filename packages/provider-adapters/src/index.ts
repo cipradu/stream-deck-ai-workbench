@@ -14,6 +14,14 @@ export {
   createSourceGatedUsageFetchEffect,
 } from "./source-gates.js";
 export { normalizeBalanceProviderResponse } from "./providers/balance/index.js";
+export {
+  AdapterSourceFlightRuntimeCapability,
+  AdapterSourceFlightRuntimeLive,
+  advanceAdapterSourceCredentialGeneration,
+  makeAdapterSourceFlightRuntimeLive,
+  shutdownAdapterSourceFlightRuntime,
+} from "./source-flight-runtime.js";
+export type { AdapterSourceFlightRuntimeTestObserver, AdapterSourceRequestIdentity } from "./source-flight-runtime.js";
 export type {
   BalanceProviderAdapterBinding,
   BalanceProviderNormalizationResult,

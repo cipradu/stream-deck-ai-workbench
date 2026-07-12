@@ -14,6 +14,8 @@ import type { SanitizedFailure } from "@ai-workbench/errors";
 import type { ProviderCapabilityMetadata, SourceProofStatus } from "@ai-workbench/provider-registry";
 import type { SchedulerFetch } from "@ai-workbench/scheduler";
 
+import type { AdapterSourceFlightRuntimeCapability } from "./source-flight-runtime.js";
+
 export type ProviderAdapterSourceAccess = "source-gated" | "source-fetch";
 
 export interface UsageProviderAdapterBinding {
@@ -135,6 +137,14 @@ export interface ProviderSourceFetchInputBase {
   readonly baseUrl: string;
   readonly resolveCredential: ResolveProviderCredentialMaterial;
   readonly now?: () => number;
+  /**
+   * Safe, plugin-scoped coordination capability supplied only by the real app
+   * composition. Dispatch fails closed when it is absent; it never substitutes
+   * an ungoverned source path.
+   */
+  readonly sourceFlightRuntime?: AdapterSourceFlightRuntimeCapability;
+  readonly credentialProfileId?: string;
+  readonly rateLimitDomain?: string;
 }
 
 export interface CreateBalanceProviderSourceFetchInput extends ProviderSourceFetchInputBase {

@@ -1,9 +1,22 @@
 import type { UsageProviderId } from "@ai-workbench/contracts";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+import { Effect } from "effect";
 
-import type { EffectUsageSchedulerFetch } from "../../effect-fetch.js";
+import {
+  isGovernorBlocked,
+  schedulerFailureFromGovernorBlocked,
+  type EffectSchedulerFetch,
+  type EffectUsageSchedulerFetch,
+} from "../../effect-fetch.js";
+import { ProviderAdapterAttemptContext } from "../../governed-request.js";
+import { executeAdapterSource, runClaudeCodeUsageSource } from "../../source-flight-runtime.js";
 import type { CreateUsageProviderSourceFetchInput, UsageProviderAdapterBinding } from "../../types.js";
-import { claudeCodeUsageProviderModule } from "./claude-code/index.js";
+import {
+  claudeCodeUsageProviderModule,
+  createClaudeCodeUsageSourceOperation,
+  projectClaudeCodeUsageResponse,
+  validateClaudeCodeUsageRequest,
+} from "./claude-code/index.js";
 import { codexUsageProviderModule } from "./codex/index.js";
 import { minimaxUsageProviderModule } from "./minimax/index.js";
 import { zaiCodingPlanUsageProviderModule } from "./zai-coding-plan/index.js";
@@ -36,8 +49,66 @@ export const usageProviderModules: readonly UsageProviderModule[] = [
  */
 export function createUsageProviderSourceFetchEffect(
   input: CreateUsageProviderSourceFetchInput,
-): EffectUsageSchedulerFetch | undefined {
-  return usageProviderModules
-    .find((providerModule) => providerModule.providerId === input.providerId)
-    ?.createSourceFetchEffect?.(input);
+): EffectSchedulerFetch | undefined {
+  if (
+    input.providerId === "claude-code" &&
+    input.sourceFlightRuntime !== undefined &&
+    input.credentialProfileId !== undefined &&
+    input.rateLimitDomain !== undefined
+  ) {
+    const source = createClaudeCodeUsageSourceOperation(input);
+    const sourceFlightRuntime = input.sourceFlightRuntime;
+    const credentialProfileId = input.credentialProfileId;
+    const rateLimitDomain = input.rateLimitDomain;
+
+    return (request) =>
+      validateClaudeCodeUsageRequest(request).pipe(
+        Effect.zipRight(
+          runClaudeCodeUsageSource(
+            sourceFlightRuntime,
+            {
+              providerId: "claude-code",
+              credentialProfileId,
+              rateLimitDomain,
+              sourceIdentity: "oauth-usage",
+              normalizedRequestVariant: "default",
+            },
+            (attempts) => source(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attempts)),
+          ),
+        ),
+        Effect.flatMap((body) => projectClaudeCodeUsageResponse(body, request, input.now)),
+        Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
+      );
+  }
+
+  const providerModule = usageProviderModules.find((candidate) => candidate.providerId === input.providerId);
+  const sourceFetch = providerModule?.createSourceFetchEffect?.(input);
+  if (
+    sourceFetch === undefined ||
+    providerModule === undefined ||
+    input.sourceFlightRuntime === undefined ||
+    input.credentialProfileId === undefined ||
+    input.rateLimitDomain === undefined
+  ) {
+    return undefined;
+  }
+  const sourceFlightRuntime = input.sourceFlightRuntime;
+  const credentialProfileId = input.credentialProfileId;
+  const rateLimitDomain = input.rateLimitDomain;
+
+  return (request) =>
+    executeAdapterSource(
+      sourceFlightRuntime,
+      {
+        providerId: providerModule.providerId,
+        credentialProfileId,
+        rateLimitDomain,
+        sourceIdentity: providerModule.providerId,
+        normalizedRequestVariant: request.keyParts.windowOrPeriod ?? "current",
+      },
+      (attempts) => sourceFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attempts)),
+    )
+      .pipe(
+        Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
+      );
 }

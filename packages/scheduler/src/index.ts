@@ -11,33 +11,26 @@ import type { HttpRetryClassificationInput } from "@ai-workbench/http";
 import type { ActionSettingsChangeClassification, GlobalSettingsChangeClassification } from "@ai-workbench/settings";
 import { Clock, Deferred, Duration, Effect, Fiber, Layer, ManagedRuntime, Random, Ref, Schedule } from "effect";
 
+import {
+  JITTER_MAX_MULTIPLIER,
+  JITTER_MIN_MULTIPLIER,
+  RATE_LIMIT_DELAY_SCHEDULE,
+  retryAfterDelayMs,
+  SCHEDULER_BACKOFF_POLICY,
+  TRANSIENT_DELAY_SCHEDULE,
+} from "./scheduler-policy.js";
+
+export { SCHEDULER_BACKOFF_POLICY } from "./scheduler-policy.js";
+
 export const packageName = "@ai-workbench/scheduler" as const;
+
+export * from "./provider-request-governor.js";
 
 // Central scheduler policy constants: shape + values preserved across the
 // Effect-native rebuild. The `stale.*` block covers staleness/expiry; the
 // `transient`/`rateLimit`/`jitter` blocks are the frozen basis for the Effect `Schedule`
 // failure back-off below. NO hand-rolled exponential backoff math lives here — Effect `Schedule`
 // owns the exponential growth, jitter, and cap.
-export const SCHEDULER_BACKOFF_POLICY = {
-  transient: {
-    initialDelayMs: 30_000,
-    maxDelayMs: 300_000,
-  },
-  rateLimit: {
-    initialDelayMs: 60_000,
-    maxDelayMs: 600_000,
-    maxRetryAfterMs: 3_600_000,
-  },
-  stale: {
-    ageMultiplier: 2,
-    maxDisplayMs: 86_400_000,
-  },
-  jitter: {
-    minRatio: 0,
-    maxRatio: 0.2,
-  },
-} as const;
-
 export type SchedulerBackoffClass = "transient" | "rate-limit";
 export type SchedulerJitterClass = SchedulerBackoffClass | "healthy-poll";
 /**
@@ -241,42 +234,6 @@ const INERT_ABORT_SIGNAL: SchedulerAbortSignal = {
   aborted: false,
   addEventListener: () => undefined,
 };
-
-// Positive-only jitter multipliers derived from the frozen policy ratios:
-// `1 + ratio`, so the effective multiplier lands in [1.0, 1.2] (0-20% added), never below the base.
-const JITTER_MIN_MULTIPLIER = 1 + SCHEDULER_BACKOFF_POLICY.jitter.minRatio;
-const JITTER_MAX_MULTIPLIER = 1 + SCHEDULER_BACKOFF_POLICY.jitter.maxRatio;
-
-/**
- * The Effect `Schedule` that produces the sequence of failure back-off delays for one class.
- * Effect `Schedule` owns all of the math — there is no hand-rolled exponentiation:
- *   exponential growth (factor 2 from the frozen base)
- *     -> `jitteredWith` positive 0-20% jitter (`d * (1 + 0.2 * random)`)
- *     -> `either(spaced(cap))` unions with a constant `cap`, and a union takes the SHORTER delay,
- *        so the cap clamps the delay AFTER jitter (the effective delay never exceeds the class cap).
- * `delays` re-projects the applied delay as the schedule Output, and `delayed(() => zero)` drops the
- * schedule's own sleep. So driving this yields the exact next delay WITHOUT sleeping: the fiber reads
- * that delay (to populate `SchedulerOutput.backoff`), then sleeps it itself on the Effect `Clock`
- * (deterministic under `TestClock`). Jitter draws from the Effect `Random` service (real randomness in
- * production; tests inject a seeded `Random` via `Layer.setRandom` for determinism).
- */
-function backoffDelaySchedule(initialDelayMs: number, maxDelayMs: number): Schedule.Schedule<Duration.Duration> {
-  return Schedule.exponential(Duration.millis(initialDelayMs), 2).pipe(
-    Schedule.jitteredWith({ min: JITTER_MIN_MULTIPLIER, max: JITTER_MAX_MULTIPLIER }),
-    Schedule.either(Schedule.spaced(Duration.millis(maxDelayMs))),
-    Schedule.delays,
-    Schedule.delayed(() => Duration.zero),
-  );
-}
-
-const TRANSIENT_DELAY_SCHEDULE = backoffDelaySchedule(
-  SCHEDULER_BACKOFF_POLICY.transient.initialDelayMs,
-  SCHEDULER_BACKOFF_POLICY.transient.maxDelayMs,
-);
-const RATE_LIMIT_DELAY_SCHEDULE = backoffDelaySchedule(
-  SCHEDULER_BACKOFF_POLICY.rateLimit.initialDelayMs,
-  SCHEDULER_BACKOFF_POLICY.rateLimit.maxDelayMs,
-);
 
 /**
  * The Effect `Schedule` that produces ONE jittered healthy-poll delay for the current refresh
@@ -851,15 +808,6 @@ function backoffClassForFailure(failure: SanitizedFailure): SchedulerBackoffClas
     default:
       return undefined;
   }
-}
-
-/** A sanitized provider `Retry-After` in milliseconds, capped at the 1h policy maximum; `undefined`
- * when absent or not a positive finite value (so the exponential back-off applies instead). */
-function retryAfterDelayMs(retryAfterSeconds: number | undefined): number | undefined {
-  if (retryAfterSeconds === undefined || !Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
-    return undefined;
-  }
-  return Math.min(Math.trunc(retryAfterSeconds * 1_000), SCHEDULER_BACKOFF_POLICY.rateLimit.maxRetryAfterMs);
 }
 
 /**

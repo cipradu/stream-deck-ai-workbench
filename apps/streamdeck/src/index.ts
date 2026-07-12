@@ -101,6 +101,7 @@ export async function startAiWorkbenchStreamDeckPlugin(deck: typeof streamDeck =
       write: (settings) => deck.settings.setGlobalSettings(asJsonObject(settings)),
     },
     logSink,
+    providerRequestRuntime: services.providerRequestRuntime,
     scheduler: services.scheduler,
   });
   const run = createManagedRuntimeRunner(services.managedRuntime, logSink);
@@ -159,7 +160,7 @@ export async function startAiWorkbenchStreamDeckPlugin(deck: typeof streamDeck =
       // scheduler.shutdown() (the scheduler shares this runtime, so its shutdown() interrupts its own
       // fibers without disposing the shared runtime). Keep those explicit stops: disposing the runtime is
       // not a substitute for them, so removing stopRenderLoop() would leak the render fiber.
-      await services.managedRuntime.dispose();
+      await services.shutdown();
     },
   };
 }

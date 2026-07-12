@@ -4,7 +4,12 @@ import { HttpClient as PlatformHttpClient } from "@effect/platform";
 import { createSanitizedFailure, type SanitizedFailure } from "../../errors/src/index.js";
 import { fetchHttpClientLayer } from "../../http/src/index.js";
 import type { SchedulerFetch } from "../../scheduler/src/index.js";
-import type { EffectSchedulerFetch } from "../src/effect-fetch.js";
+import {
+  isGovernorBlocked,
+  schedulerFailureFromGovernorBlocked,
+  type EffectProviderSourceFetch,
+} from "../src/effect-fetch.js";
+import { ProviderAdapterAttemptContext } from "../src/governed-request.js";
 
 // ---------------------------------------------------------------------------
 // Test-only Effect-adapter -> Promise-`SchedulerFetch` bridge.
@@ -27,11 +32,17 @@ import type { EffectSchedulerFetch } from "../src/effect-fetch.js";
  * is the single retry owner.
  */
 export function bridgeEffectSchedulerFetch(
-  effectFetch: EffectSchedulerFetch,
+  effectFetch: EffectProviderSourceFetch,
   httpClientLayer: Layer.Layer<PlatformHttpClient.HttpClient> = fetchHttpClientLayer,
 ): SchedulerFetch {
   return async (request) => {
-    const exit = await Effect.runPromiseExit(effectFetch(request).pipe(Effect.provide(httpClientLayer)));
+    const exit = await Effect.runPromiseExit(
+      effectFetch(request).pipe(
+        Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
+        Effect.provide(httpClientLayer),
+        Effect.provideService(ProviderAdapterAttemptContext, testAttemptContext),
+      ),
+    );
     if (Exit.isSuccess(exit)) {
       return { ok: true, snapshot: exit.value };
     }
@@ -43,6 +54,11 @@ export function bridgeEffectSchedulerFetch(
     return { ok: false, ...failure };
   };
 }
+
+const testAttemptContext = {
+  attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) => operation,
+  reportRateLimit: () => Effect.void,
+};
 
 function adapterEffectDefectFailure(): SanitizedFailure {
   return createSanitizedFailure({

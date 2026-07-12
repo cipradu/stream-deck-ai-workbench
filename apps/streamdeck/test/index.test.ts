@@ -18,7 +18,7 @@ import type {
   SchedulerSettingsChangeInput,
 } from "@ai-workbench/scheduler";
 import { parseActionSettings, parsePropertyInspectorPayload } from "@ai-workbench/settings";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { BALANCE_ACTION_UUID, PLUGIN_UUID, USAGE_ACTION_UUID, packageName } from "../src/constants.js";
 import { resolveCredentialMaterialFromGlobalSettings } from "../src/credentials.js";
@@ -26,7 +26,7 @@ import { createSdkLogSink, writeShellLog } from "../src/logging.js";
 import { listProviderOptionsForFamily } from "../src/property-inspector.js";
 import { prepareLogoSvg } from "../src/logo-loader.js";
 import { renderDisplayInput } from "../src/renderer.js";
-import { createAppManagedRuntime } from "../src/runtime.js";
+import { createAppManagedRuntime, createRuntimeServices } from "../src/runtime.js";
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
 import { parseClaudeCodeKeychainPayload, parseCodexAuthJsonPayload, parseLastRateLimitsLine } from "../src/local-usage-sources.js";
 import {
@@ -62,6 +62,13 @@ const usageSettings = {
   },
   windowOrPeriod: "five-hour",
 } as const;
+
+const testProviderRequestRuntimeServices = createRuntimeServices({ write: () => undefined });
+const testProviderRequestRuntime = testProviderRequestRuntimeServices.providerRequestRuntime;
+
+afterAll(async () => {
+  await testProviderRequestRuntimeServices.shutdown();
+});
 
 function manifestPath(): string {
   return fileURLToPath(new URL("../com.blackice.ai-workbench.sdPlugin/manifest.json", import.meta.url));
@@ -284,6 +291,7 @@ function createShell(input: {
     shell: new StreamDeckShell({
       globalSettings,
       logSink,
+      providerRequestRuntime: testProviderRequestRuntime,
       scheduler,
     }),
   };
