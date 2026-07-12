@@ -1,15 +1,17 @@
 import { Effect, Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { balanceSnapshotResult, monthStartDateString, parseBalanceResponse } from "../../../balance-normalization.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import {
   schedulerFailureFromTagged,
+  isGovernorBlocked,
   type AdapterFetchFailure,
   type EffectBalanceSchedulerFetch,
 } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { abortSignalForScheduler } from "../../../live-http.js";
 import { credentialResolutionFailure, isClientErrorFailure, semanticValidationFailure } from "../../../provider-failures.js";
 import type {
@@ -77,7 +79,7 @@ export const exaBalanceProviderModule = {
         // tap (a nested function), which would defeat TS narrowing on it directly.
         let apiKeyId = cachedApiKeyId;
         if (apiKeyId === undefined) {
-          const apiKeysBody = yield* requestJsonSchema(
+          const apiKeysBody = yield* governedRequestJsonSchema(
             { url: new URL("/team-management/api-keys", input.baseUrl), headers, signal },
             // The discovery response has no vendor schema in the original adapter; it applies
             // the `firstApiKeyId` heuristic to the raw decoded JSON, preserved verbatim here.
@@ -98,7 +100,7 @@ export const exaBalanceProviderModule = {
 
         const usageUrl = new URL(`/team-management/api-keys/${encodeURIComponent(apiKeyId)}/usage`, input.baseUrl);
         usageUrl.searchParams.set("start_date", monthStartDateString(fetchedAtEpochMs));
-        const usageBody = yield* requestJsonSchema(
+        const usageBody = yield* governedRequestJsonSchema(
           { url: usageUrl, headers, signal },
           ExaUsageResponseSchema,
           { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
@@ -108,7 +110,7 @@ export const exaBalanceProviderModule = {
           // re-discovers. See `isClientErrorFailure` for the taxonomy-to-4xx mapping.
           Effect.tapError((taggedError) =>
             Effect.sync(() => {
-              if (isClientErrorFailure(taggedError)) {
+              if (!isGovernorBlocked(taggedError) && isClientErrorFailure(taggedError)) {
                 cachedApiKeyId = undefined;
               }
             }),

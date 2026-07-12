@@ -9,6 +9,7 @@ import {
 } from "../../contracts/src/index.js";
 import type { ImplementationStatus } from "../../contracts/src/index.js";
 import {
+  DEFAULT_PROVIDER_COORDINATION_POLICY,
   IMPLEMENTATION_STATUS_BEHAVIOR,
   PROVIDER_REGISTRY,
   SEVERITY_STRATEGY_REFERENCES,
@@ -16,6 +17,7 @@ import {
   deriveProviderSelectionOptions,
   findProviderEntry,
   listProviderEntriesForFamily,
+  resolveProviderCoordinationPolicy,
   resolveCapabilityMetricForWindow,
 } from "../src/index.js";
 import type { ProviderRegistryEntry } from "../src/index.js";
@@ -48,6 +50,20 @@ function expectRequiresUserProfileSeverity(providerId: string) {
   });
 }
 
+const fabricatedSecretLikeValue = "test-secret-value";
+
+function expectExactErrorMessage(operation: () => unknown, expectedMessage: string): void {
+  let thrown: unknown;
+  try {
+    operation();
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).message).toBe(expectedMessage);
+}
+
 describe("provider registry catalog completeness", () => {
   it("contains exactly the first Usage provider catalog", () => {
     expect(asSortedSet(listProviderEntriesForFamily("usage").map((entry) => entry.providerId))).toEqual(
@@ -70,6 +86,116 @@ describe("provider registry catalog completeness", () => {
 });
 
 describe("provider registry metadata derives shared contract truth", () => {
+  it("declares only Claude Code's four compatible usage categories for accepted source fan-out", () => {
+    expect(firstCapability("claude-code")?.supportedWindows).toEqual([
+      "five-hour",
+      "seven-day",
+      "fable",
+      "credit-spend",
+    ]);
+    expect(firstCapability("claude-code")?.coordinationPolicy).toEqual({
+      rateLimitDomain: "provider-profile",
+      sourceIdentity: "adapter-declared",
+      sourceSharing: "fan-out",
+      rateLimitDomainEvidence: { status: "not-required" },
+      sourceSharingEvidence: { status: "accepted", source: "local-source" },
+    });
+  });
+
+  it("resolves the explicit conservative provider-profile policy for every other current capability", () => {
+    expect(DEFAULT_PROVIDER_COORDINATION_POLICY).toEqual({
+      rateLimitDomain: "provider-profile",
+      sourceIdentity: "adapter-declared",
+      sourceSharing: "not-declared",
+      rateLimitDomainEvidence: { status: "not-required" },
+      sourceSharingEvidence: { status: "not-required" },
+    });
+
+    for (const capability of allCapabilities().filter((capability) => capability.providerId !== "claude-code")) {
+      expect(capability.coordinationPolicy).toEqual({
+        rateLimitDomain: "provider-profile",
+        sourceIdentity: "adapter-declared",
+        sourceSharing: "not-declared",
+        rateLimitDomainEvidence: { status: "not-required" },
+        sourceSharingEvidence: { status: "not-required" },
+      });
+    }
+  });
+
+  it.each([
+    {
+      rateLimitDomain: {
+        kind: "evidence-backed",
+        domain: "provider-workspace",
+        evidence: { status: "not-required" },
+      },
+      sourceSharing: { kind: "not-declared" },
+    },
+    {
+      rateLimitDomain: {
+        kind: "evidence-backed",
+        domain: "provider_scope",
+        evidence: { status: "accepted", source: "primary-source" },
+      },
+      sourceSharing: { kind: "not-declared" },
+    },
+    {
+      rateLimitDomain: {
+        kind: "provider-profile",
+        domain: "provider-profile",
+        evidence: { status: "not-required" },
+      },
+      sourceSharing: {
+        kind: "fan-out",
+        evidence: { status: "not-required" },
+      },
+    },
+    {
+      rateLimitDomain: {
+        kind: "provider-profile",
+        domain: "provider-profile",
+        evidence: { status: "not-required" },
+      },
+      sourceSharing: {
+        kind: "fan-out",
+        evidence: { status: "accepted", source: "local-source" },
+        sourceIdentity: `${fabricatedSecretLikeValue}-source`,
+      },
+    },
+    {
+      rateLimitDomain: {
+        kind: "evidence-backed",
+        domain: `${fabricatedSecretLikeValue}_domain`,
+        evidence: { status: "accepted", source: "primary-source" },
+      },
+      sourceSharing: { kind: "not-declared", evidence: { status: "not-required" } },
+    },
+  ])("rejects an unproven or unsafe special coordination declaration", (declaration) => {
+    expectExactErrorMessage(() => resolveProviderCoordinationPolicy(declaration), "Invalid provider coordination policy");
+  });
+
+  it("accepts a future special declaration only when both policy facts carry accepted evidence", () => {
+    expect(
+      resolveProviderCoordinationPolicy({
+        rateLimitDomain: {
+          kind: "evidence-backed",
+          domain: "provider-workspace",
+          evidence: { status: "accepted", source: "primary-source" },
+        },
+        sourceSharing: {
+          kind: "fan-out",
+          evidence: { status: "accepted", source: "local-source" },
+        },
+      }),
+    ).toEqual({
+      rateLimitDomain: "provider-workspace",
+      sourceIdentity: "adapter-declared",
+      sourceSharing: "fan-out",
+      rateLimitDomainEvidence: { status: "accepted", source: "primary-source" },
+      sourceSharingEvidence: { status: "accepted", source: "local-source" },
+    });
+  });
+
   it("derives every metric direction and display unit from contract maps", () => {
     for (const capability of allCapabilities()) {
       expect(capability.metricDirection).toBe(METRIC_KIND_DIRECTION[capability.metricKind]);
@@ -359,6 +485,7 @@ describe("registry-derived provider selection and onboarding", () => {
       {
         actionFamilyId: "balance",
         adapterBindingId: "balance.future-provider",
+        coordinationPolicy: DEFAULT_PROVIDER_COORDINATION_POLICY,
         coverageKind: "evergreen",
         credentialClasses: ["plugin-api-key"],
         displayBasis: "remaining-value",

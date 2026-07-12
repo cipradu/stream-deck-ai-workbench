@@ -3,7 +3,9 @@ import { HttpClient as PlatformHttpClient } from "@effect/platform";
 
 import type { NormalizedSnapshot } from "@ai-workbench/contracts";
 import { taggedFailureToSanitizedFailure, type SanitizedTaggedError } from "@ai-workbench/errors";
-import type { SchedulerFetchRequest, SchedulerFetchResult } from "@ai-workbench/scheduler";
+import type { GovernorBlocked, SchedulerFetchRequest, SchedulerFetchResult } from "@ai-workbench/scheduler";
+
+import type { ProviderAdapterAttemptContext } from "./governed-request.js";
 
 // ---------------------------------------------------------------------------
 // Effect-native adapter source-fetch shape + tagged->plain failure mapping.
@@ -41,11 +43,39 @@ export type EffectSchedulerFetch = (
   request: SchedulerFetchRequest,
 ) => Effect.Effect<NormalizedSnapshot, AdapterFetchFailure, PlatformHttpClient.HttpClient>;
 
-/** Balance adapters' Effect-native source fetch. */
-export type EffectBalanceSchedulerFetch = EffectSchedulerFetch;
+/**
+ * An adapter-private source fetch. It carries the mandatory attempt-context
+ * requirement and can fail only with the existing adapter failure or the
+ * governor's already-sanitized blocked result. Dispatch consumes that result
+ * before handing a narrowed fetch to the source gate and scheduler.
+ */
+export type EffectProviderSourceFetch = (
+  request: SchedulerFetchRequest,
+) => Effect.Effect<
+  NormalizedSnapshot,
+  AdapterFetchFailure | GovernorBlocked,
+  PlatformHttpClient.HttpClient | ProviderAdapterAttemptContext
+>;
 
-/** Usage adapters' Effect-native source fetch; the pure-HTTP z.ai adapter today. */
-export type EffectUsageSchedulerFetch = EffectSchedulerFetch;
+/** Balance adapters' adapter-private source fetch. */
+export type EffectBalanceProviderSourceFetch = EffectProviderSourceFetch;
+
+/** Usage adapters' adapter-private source fetch. */
+export type EffectUsageProviderSourceFetch = EffectProviderSourceFetch;
+
+/** @internal Adapter-module source type retained at its established import seam. */
+export type EffectBalanceSchedulerFetch = EffectBalanceProviderSourceFetch;
+
+/** @internal Adapter-module source type retained at its established import seam. */
+export type EffectUsageSchedulerFetch = EffectUsageProviderSourceFetch;
+
+/** Converts a safe governor block at the adapter/source dispatch boundary. */
+export function schedulerFailureFromGovernorBlocked(blocked: GovernorBlocked): AdapterFetchFailure {
+  return {
+    failure: blocked.failure,
+    ...(blocked.retryAfterSeconds === undefined ? {} : { retry: { retryAfterSeconds: blocked.retryAfterSeconds } }),
+  };
+}
 
 /**
  * Maps the shared HTTP `Data.TaggedError` taxonomy to the plain adapter failure the
@@ -53,7 +83,18 @@ export type EffectUsageSchedulerFetch = EffectSchedulerFetch;
  * plain `SanitizedFailure` cannot carry). Mirrors the Promise helper's exit mapping in
  * `packages/http` so both surfaces classify identically. No raw `Cause` crosses.
  */
-export function schedulerFailureFromTagged(error: SanitizedTaggedError): AdapterFetchFailure {
+export function isGovernorBlocked(
+  error: AdapterFetchFailure | SanitizedTaggedError | GovernorBlocked,
+): error is GovernorBlocked {
+  return "_tag" in error && String(error._tag) === "GovernorBlocked";
+}
+
+export function schedulerFailureFromTagged(
+  error: SanitizedTaggedError | GovernorBlocked,
+): AdapterFetchFailure | GovernorBlocked {
+  if (isGovernorBlocked(error)) {
+    return error;
+  }
   const failure = taggedFailureToSanitizedFailure(error);
   return error._tag === "RateLimited" && error.retryAfterSeconds !== undefined
     ? { failure, retry: { retryAfterSeconds: error.retryAfterSeconds } }

@@ -2,12 +2,14 @@ import { Effect } from "effect";
 import { HttpClient as PlatformHttpClient } from "@effect/platform";
 
 import type { SanitizedTaggedError } from "@ai-workbench/errors";
+import type { GovernorBlocked } from "@ai-workbench/scheduler";
 
 import {
   schedulerFailureFromTagged,
   type AdapterFetchFailure,
   type EffectBalanceSchedulerFetch,
 } from "./effect-fetch.js";
+import type { ProviderAdapterAttemptContext } from "./governed-request.js";
 import { abortSignalForScheduler } from "./live-http.js";
 import { credentialResolutionFailure } from "./provider-failures.js";
 import type {
@@ -53,7 +55,11 @@ import type {
 export type BalanceSourceFetchBody = (
   credential: ProviderCredentialMaterial,
   context: BalanceSourceFetchContext,
-) => Effect.Effect<unknown, SanitizedTaggedError, PlatformHttpClient.HttpClient>;
+) => Effect.Effect<
+  unknown,
+  SanitizedTaggedError | GovernorBlocked,
+  PlatformHttpClient.HttpClient | ProviderAdapterAttemptContext
+>;
 
 export interface BalanceSourceFetchContext {
   readonly baseUrl: string;

@@ -1,12 +1,13 @@
 import { Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { balanceSnapshotResult, parseBalanceResponse } from "../../../balance-normalization.js";
 import { createBalanceSourceFetchEffect } from "../../../balance-source-fetch.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import type { EffectBalanceSchedulerFetch } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import type {
   BalanceProviderAdapterBinding,
   BalanceProviderNormalizationResult,
@@ -37,7 +38,7 @@ export const falBalanceProviderModule = {
   createSourceFetchEffect(input: CreateBalanceProviderSourceFetchInput): EffectBalanceSchedulerFetch {
     return createBalanceSourceFetchEffect(input, {
       fetchBody: (credential, { baseUrl, signal }) =>
-        requestJsonSchema(
+        governedRequestJsonSchema(
           {
             url: new URL("/v1/account/billing?expand=credits", baseUrl),
             // The SINGLE `Redacted.value` unwrap for this adapter: the request-builder secret read.

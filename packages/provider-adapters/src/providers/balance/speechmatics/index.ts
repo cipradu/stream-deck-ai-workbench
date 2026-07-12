@@ -1,12 +1,13 @@
 import { Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { balanceSnapshotResult, monthStartDateString, parseBalanceResponse, sum } from "../../../balance-normalization.js";
 import { createBalanceSourceFetchEffect } from "../../../balance-source-fetch.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import type { EffectBalanceSchedulerFetch } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import type {
   BalanceProviderAdapterBinding,
   BalanceProviderNormalizationResult,
@@ -50,7 +51,7 @@ export const speechmaticsBalanceProviderModule = {
       fetchBody: (credential, { baseUrl, signal, fetchedAtEpochMs }) => {
         const url = new URL("/v2/usage", baseUrl);
         url.searchParams.set("since", monthStartDateString(fetchedAtEpochMs));
-        return requestJsonSchema(
+        return governedRequestJsonSchema(
           {
             url,
             // The SINGLE `Redacted.value` unwrap for this adapter: the request-builder secret read.

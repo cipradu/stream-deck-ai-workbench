@@ -19,6 +19,7 @@ import {
   type ProviderCapabilityMetadata,
   type ProviderPresentationMetadata,
   type RegistryOpenDecision,
+  type ResolvedProviderCapabilityMetadata,
   type ResolvedCapabilityMetric,
   type SourceProofStatus,
 } from "@ai-workbench/provider-registry";
@@ -56,7 +57,7 @@ export interface UsageProviderOption {
 
 export interface ResolvedUsageProviderOption extends UsageProviderOption {
   readonly windowOrPeriod: UsageWindowId;
-  readonly capability: ProviderCapabilityMetadata;
+  readonly capability: ResolvedProviderCapabilityMetadata;
 }
 
 export interface ResolveUsageProviderOptionInput {

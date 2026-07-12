@@ -21,6 +21,7 @@ import {
   type DisplayBasis,
   type ProviderCapabilityMetadata,
   type ProviderPresentationMetadata,
+  type ResolvedProviderCapabilityMetadata,
   type SourceProofStatus,
 } from "@ai-workbench/provider-registry";
 import type { SchedulerFetch, SchedulerOutput } from "@ai-workbench/scheduler";
@@ -59,7 +60,7 @@ export interface BalanceProviderOption {
 }
 
 export interface ResolvedBalanceProviderOption extends BalanceProviderOption {
-  readonly capability: ProviderCapabilityMetadata;
+  readonly capability: ResolvedProviderCapabilityMetadata;
 }
 
 export interface ResolveBalanceProviderOptionInput {

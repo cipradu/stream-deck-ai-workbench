@@ -1,9 +1,11 @@
+import type { HttpClient as PlatformHttpClient } from "@effect/platform";
 import { Clock, Effect, Option, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
 import { MissingCredentials } from "@ai-workbench/errors";
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+import type { GovernorBlocked, SchedulerFetchRequest } from "@ai-workbench/scheduler";
 
 import { createUsageProviderAdapterBinding } from "../../../binding-helpers.js";
 import {
@@ -11,6 +13,7 @@ import {
   type AdapterFetchFailure,
   type EffectUsageSchedulerFetch,
 } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema, type ProviderAdapterAttemptContext } from "../../../governed-request.js";
 import { abortSignalForScheduler } from "../../../live-http.js";
 import { missingCredentialsFetchFailure, noSourceConfigured } from "../../../provider-failures.js";
 import type {
@@ -64,7 +67,7 @@ const ClaudeCodeUsageResponseSchema = Schema.Struct({
   spend: Schema.optional(Schema.Unknown),
 });
 
-type ClaudeCodeUsageResponse = Schema.Schema.Type<typeof ClaudeCodeUsageResponseSchema>;
+export type ClaudeCodeUsageResponse = Schema.Schema.Type<typeof ClaudeCodeUsageResponseSchema>;
 
 // Strict, isolated decode of ONE `limits[]` entry, decoded SEPARATELY from
 // the tolerant shared `limits` field (same isolation ethos as the Codex credits/resets decodes): the
@@ -162,145 +165,157 @@ type ClaudeCodeCredentialRead =
   | { readonly ok: true; readonly token: Redacted.Redacted<string>; readonly expiresAt?: number }
   | { readonly ok: false; readonly reasonCode: ClaudeCodeCredentialReasonCode };
 
+type ClaudeCodeUsageWindow = "five-hour" | "seven-day" | "fable" | "credit-spend";
+
+/** Validates a category before it can subscribe to the shared OAuth response. */
+export function validateClaudeCodeUsageRequest(
+  request: SchedulerFetchRequest,
+): Effect.Effect<ClaudeCodeUsageWindow, AdapterFetchFailure> {
+  const window = request.keyParts.windowOrPeriod;
+  return window === "five-hour" || window === "seven-day" || window === "fable" || window === "credit-spend"
+    ? Effect.succeed(window)
+    : Effect.fail({ failure: noSourceConfigured("usage-claude-window-not-returned").failure });
+}
+
+/**
+ * Adapter-owned typed OAuth source operation. It owns the local credential lifecycle,
+ * tolerant shared response decode, and the one-shot 401 refresh, but never chooses a
+ * category projection. One source flight can therefore serve compatible category closures.
+ */
+export function createClaudeCodeUsageSourceOperation(
+  input: CreateUsageProviderSourceFetchInput,
+): (
+  request: SchedulerFetchRequest,
+) => Effect.Effect<
+  ClaudeCodeUsageResponse,
+  AdapterFetchFailure | GovernorBlocked,
+  PlatformHttpClient.HttpClient | ProviderAdapterAttemptContext
+> {
+  const readCredential = input.localSources?.claudeCode?.readCredential;
+  if (readCredential === undefined) {
+    return () =>
+      Effect.fail<AdapterFetchFailure>({
+        failure: noSourceConfigured("usage-claude-source-reader-missing").failure,
+      });
+  }
+
+  const baseUrl = input.baseUrl;
+  const now = input.now;
+
+  return (request) =>
+    Effect.gen(function* () {
+      const signal = abortSignalForScheduler(request.signal);
+      const usageUrl = new URL("/api/oauth/usage", baseUrl);
+
+      // Reads the local credential once, wrapping the plain token in `Redacted` immediately. A
+      // rejected read (defensive — the Keychain reader resolves ok/not-ok in practice) fails
+      // with a sanitized tagged error carrying no cause. Re-running this Effect re-invokes the
+      // reader, which is exactly what the proactive/refresh re-reads need.
+      const readOnce = Effect.tryPromise({
+        try: () => readCredential(),
+        catch: () => credentialReadRejected(),
+      }).pipe(Effect.map(normalizeCredentialRead));
+
+      // Proactive stale-`expiresAt` re-read BEFORE the first call. Shares the single re-read
+      // budget with the 401 refresh below; a stale re-read spends the budget (`reRead`).
+      let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+      let reRead = false;
+      if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= (now?.() ?? (yield* Clock.currentTimeMillis))) {
+        credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+        reRead = true;
+      }
+      if (!credential.ok) {
+        return yield* Effect.fail<AdapterFetchFailure>({
+          failure: missingCredentialsFetchFailure(credential.reasonCode).failure,
+        });
+      }
+
+      const attempt = (token: Redacted.Redacted<string>) =>
+        governedRequestJsonSchema(
+          { url: usageUrl, headers: claudeCodeHeaders(token), signal },
+          ClaudeCodeUsageResponseSchema,
+          { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
+        );
+
+      // The 401 refresh is provider-auth logic, not scheduler backoff. Each HTTP call still
+      // takes one fresh governor attempt permit through `governedRequestJsonSchema`.
+      const decoded = reRead
+        ? attempt(credential.token)
+        : attempt(credential.token).pipe(
+            Effect.catchTag("UnauthorizedExpired", () =>
+              readOnce.pipe(
+                Effect.flatMap((refreshed) =>
+                  refreshed.ok ? attempt(refreshed.token) : Effect.fail(missingCredentialsError(refreshed.reasonCode)),
+                ),
+              ),
+            ),
+          );
+
+      return yield* decoded.pipe(Effect.mapError(schedulerFailureFromTagged));
+    });
+}
+
+/** Projects one category from a decoded shared OAuth response without mutating it or caching it. */
+export function projectClaudeCodeUsageResponse(
+  body: ClaudeCodeUsageResponse,
+  request: SchedulerFetchRequest,
+  now?: () => number,
+): Effect.Effect<NormalizedSnapshot, AdapterFetchFailure> {
+  return Effect.gen(function* () {
+    const window = yield* validateClaudeCodeUsageRequest(request);
+
+    // Credit-spend uses the same response's `spend` object but has a distinct snapshot shape.
+    // Malformed or absent spend remains a category-local sanitized no-data result.
+    if (window === "credit-spend") {
+      const spend = spendSnapshotValuesForResponse(body);
+      if (spend === undefined) {
+        return yield* Effect.fail<AdapterFetchFailure>({
+          failure: noSourceConfigured("usage-claude-credit-spend-not-returned").failure,
+        });
+      }
+      return claudeCodeSpendSnapshot(spend, now?.() ?? request.startedAtEpochMs);
+    }
+
+    // Fable has its own tolerant `limits[]` projection; the named window projections stay
+    // independent, so malformed optional categories cannot poison each other.
+    const matched = window === "fable" ? fableUsageForResponse(body) : usageWindowForResponse(body, window);
+    if (matched === undefined) {
+      return yield* Effect.fail<AdapterFetchFailure>({
+        failure: noSourceConfigured(
+          window === "fable" ? "usage-claude-fable-not-returned" : "usage-claude-window-not-returned",
+        ).failure,
+      });
+    }
+
+    return {
+      familyId: "usage",
+      providerId,
+      metricKind: "usage-percent",
+      metricDirection: "upper-bound",
+      unit: "percent",
+      coverage: {
+        kind: "rolling-window",
+        window,
+      },
+      value: matched.value,
+      fetchedAtEpochMs: now?.() ?? request.startedAtEpochMs,
+      ...(matched.resetsAtEpochMs === undefined ? {} : { resetsAtEpochMs: matched.resetsAtEpochMs }),
+    } satisfies NormalizedSnapshot;
+  });
+}
+
 export const claudeCodeUsageProviderModule = {
   providerId,
   createBinding(capability: ProviderCapabilityMetadata): UsageProviderAdapterBinding {
     return createUsageProviderAdapterBinding(providerId, capability);
   },
-  // Effect-native HYBRID source fetch: the
-  // local-source (Keychain) + HTTP Usage variant of the Effect recipe, and the reference the
-  // codex adapter reuses. It reads the local Claude Code OAuth credential, wraps the
-  // plain access token in `Redacted` IMMEDIATELY on read (the plain token never flows past the
-  // read->wrap point), builds the OAuth usage request with the raw token at the
-  // `authorization: Bearer ...` header (the SINGLE `Redacted.value` unwrap), decodes at the
-  // source via `requestJsonSchema` (schemaBodyJson, ONE attempt per HTTP call, NO scheduler
-  // backoff), and yields the plain normalized usage snapshot. Two pieces of PROVIDER AUTH logic
-  // are preserved verbatim from the old working adapter and are NOT scheduler retry:
-  // (1) a proactive re-read of a stale-`expiresAt` token before the first call, and (2) a
-  // one-shot credential re-read + retry on a 401. Both share ONE re-read budget: a proactive
-  // re-read spends it, so a later 401 does not re-read again. The scheduler remains the single
-  // retry owner; the Effect-native scheduler consumes this adapter Effect directly (no Promise
-  // bridge on the live path).
   createSourceFetchEffect(input: CreateUsageProviderSourceFetchInput): EffectUsageSchedulerFetch {
-    const readCredential = input.localSources?.claudeCode?.readCredential;
-    if (readCredential === undefined) {
-      return () =>
-        Effect.fail<AdapterFetchFailure>({
-          failure: noSourceConfigured("usage-claude-source-reader-missing").failure,
-        });
-    }
-
-    const baseUrl = input.baseUrl;
-    const now = input.now;
-
+    const source = createClaudeCodeUsageSourceOperation(input);
     return (request) =>
-      Effect.gen(function* () {
-        const window = request.keyParts.windowOrPeriod;
-        if (window !== "five-hour" && window !== "seven-day" && window !== "fable" && window !== "credit-spend") {
-          return yield* Effect.fail<AdapterFetchFailure>({
-            failure: noSourceConfigured("usage-claude-window-not-returned").failure,
-          });
-        }
-
-        const signal = abortSignalForScheduler(request.signal);
-        const usageUrl = new URL("/api/oauth/usage", baseUrl);
-
-        // Reads the local credential once, wrapping the plain token in `Redacted` immediately. A
-        // rejected read (defensive — the Keychain reader resolves ok/not-ok in practice) fails
-        // with a sanitized tagged error carrying no cause. Re-running this Effect
-        // re-invokes the reader, which is exactly what the proactive/refresh re-reads need.
-        const readOnce = Effect.tryPromise({
-          try: () => readCredential(),
-          catch: () => credentialReadRejected(),
-        }).pipe(Effect.map(normalizeCredentialRead));
-
-        // Proactive stale-`expiresAt` re-read BEFORE the first call. Shares the single re-read
-        // budget with the 401 refresh below; a stale re-read spends the budget (`reRead`). Time
-        // comes from Effect `Clock` unless an explicit `now` seam is injected; the
-        // `??` keeps the clock read out of the hot path when the earlier conditions short-circuit.
-        let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
-        let reRead = false;
-        if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= (now?.() ?? (yield* Clock.currentTimeMillis))) {
-          credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
-          reRead = true;
-        }
-        if (!credential.ok) {
-          return yield* Effect.fail<AdapterFetchFailure>({
-            failure: missingCredentialsFetchFailure(credential.reasonCode).failure,
-          });
-        }
-
-        const attempt = (token: Redacted.Redacted<string>) =>
-          requestJsonSchema(
-            { url: usageUrl, headers: claudeCodeHeaders(token), signal },
-            ClaudeCodeUsageResponseSchema,
-            { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
-          );
-
-        // First attempt + one-shot auth refresh. The 401 refresh is PROVIDER AUTH logic, not
-        // scheduler backoff: each HTTP call is still ONE `requestJsonSchema` attempt. It fires
-        // only when the re-read budget is unspent (`!reRead`), mirroring the old adapter's
-        // `!reRead` guard exactly; a spent budget lets a 401 surface unchanged.
-        const decoded = reRead
-          ? attempt(credential.token)
-          : attempt(credential.token).pipe(
-              Effect.catchTag("UnauthorizedExpired", () =>
-                readOnce.pipe(
-                  Effect.flatMap((refreshed) =>
-                    refreshed.ok
-                      ? attempt(refreshed.token)
-                      : Effect.fail(missingCredentialsError(refreshed.reasonCode)),
-                  ),
-                ),
-              ),
-            );
-
-        const body = yield* decoded.pipe(Effect.mapError(schedulerFailureFromTagged));
-
-        // Credit-spend sources from the SAME response's `spend`
-        // object and returns a DIFFERENT snapshot shape (usage-spend money, not usage-percent), so it
-        // branches EARLY here and returns before the 5h/7d/fable percentage path — leaving that path
-        // byte-identical. A malformed/absent `spend` (or an active state with missing money) fails
-        // SOFT to the credit-spend path's own sanitized "not returned" no-data, never a broken gauge.
-        if (window === "credit-spend") {
-          const spend = spendSnapshotValuesForResponse(body);
-          if (spend === undefined) {
-            return yield* Effect.fail<AdapterFetchFailure>({
-              failure: noSourceConfigured("usage-claude-credit-spend-not-returned").failure,
-            });
-          }
-          return claudeCodeSpendSnapshot(spend, now?.() ?? request.startedAtEpochMs);
-        }
-
-        // Fable sources from `limits[]` (weekly_scoped + the Fable model display name); 5h/7d source
-        // from the named window objects. Both resolve to the SAME plain usage-percent snapshot below.
-        // Fable carries its OWN sanitized "not returned" reason code so an absent Fable entry reads as
-        // no-data, never a defaulted 0.
-        const matched = window === "fable" ? fableUsageForResponse(body) : usageWindowForResponse(body, window);
-        if (matched === undefined) {
-          return yield* Effect.fail<AdapterFetchFailure>({
-            failure: noSourceConfigured(
-              window === "fable" ? "usage-claude-fable-not-returned" : "usage-claude-window-not-returned",
-            ).failure,
-          });
-        }
-
-        const snapshot: NormalizedSnapshot = {
-          familyId: "usage",
-          providerId,
-          metricKind: "usage-percent",
-          metricDirection: "upper-bound",
-          unit: "percent",
-          coverage: {
-            kind: "rolling-window",
-            window,
-          },
-          value: matched.value,
-          fetchedAtEpochMs: now?.() ?? request.startedAtEpochMs,
-          ...(matched.resetsAtEpochMs === undefined ? {} : { resetsAtEpochMs: matched.resetsAtEpochMs }),
-        };
-        return snapshot;
-      });
+      validateClaudeCodeUsageRequest(request).pipe(
+        Effect.zipRight(source(request)),
+        Effect.flatMap((body) => projectClaudeCodeUsageResponse(body, request, input.now)),
+      );
   },
 } as const;
 

@@ -1,12 +1,13 @@
 import { Effect, Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { balanceSnapshotResult, monthStartEpochMs, parseBalanceResponse, sum } from "../../../balance-normalization.js";
 import { createBalanceSourceFetchEffect } from "../../../balance-source-fetch.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import type { EffectBalanceSchedulerFetch } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { semanticValidationFailure } from "../../../provider-failures.js";
 import type {
   BalanceProviderAdapterBinding,
@@ -61,7 +62,7 @@ export const runpodBalanceProviderModule = {
           podsUrl.searchParams.set("startTime", startTime);
           podsUrl.searchParams.set("endTime", endTime);
 
-          const podsBody = yield* requestJsonSchema(
+          const podsBody = yield* governedRequestJsonSchema(
             { url: podsUrl, headers, signal },
             Schema.Unknown,
             { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
@@ -71,7 +72,7 @@ export const runpodBalanceProviderModule = {
           endpointsUrl.searchParams.set("startTime", startTime);
           endpointsUrl.searchParams.set("endTime", endTime);
 
-          const endpointsBody = yield* requestJsonSchema(
+          const endpointsBody = yield* governedRequestJsonSchema(
             { url: endpointsUrl, headers, signal },
             Schema.Unknown,
             { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },

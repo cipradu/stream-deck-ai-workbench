@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Effect, Layer, Option, Redacted, TestClock, TestContext } from "effect";
+import { Effect, Layer, Option, Redacted, Schema, TestClock, TestContext } from "effect";
 import {
   Headers as PlatformHeaders,
   HttpClientError,
@@ -42,6 +42,11 @@ import {
   type CodexSessionSnapshot,
 } from "../src/index.js";
 import { bridgeEffectSchedulerFetch } from "./effect-fetch-bridge.js";
+import {
+  defineAdapterSourceOperation,
+  ProviderAdapterAttemptContext,
+  governedRequestJsonSchema,
+} from "../src/governed-request.js";
 import { monthStartDateString, monthStartEpochMs } from "../src/balance-normalization.js";
 import { anthropicApiBalanceProviderModule } from "../src/providers/balance/anthropic-api/index.js";
 import { deepgramBalanceProviderModule } from "../src/providers/balance/deepgram/index.js";
@@ -113,6 +118,25 @@ function isProviderFamilyIndex(modulePath: string): boolean {
     modulePath === join(sourceRoot, "providers", "balance", "index.ts") ||
     modulePath === join(sourceRoot, "providers", "index.ts")
   );
+}
+
+function countGovernedHelperCalls(modulePath: string): number {
+  const source = readFileSync(modulePath, "utf8");
+  return [...source.matchAll(/\bgoverned(?:RequestJsonSchema|RequestTextBody|ExecuteRequest)\s*\(/g)].length;
+}
+
+function directProviderHelperCallLocations(): readonly string[] {
+  const directHelperCall = /\b(?:requestJsonSchema|requestTextBody|executeRequest)\s*\(/g;
+  const sanctionedModules = new Set([join(sourceRoot, "governed-request.ts")]);
+
+  return providerTreeEntries(sourceRoot)
+    .filter((entry) => entry.kind === "file" && entry.path.endsWith(".ts"))
+    .flatMap((entry) => {
+      const matchCount = [...readFileSync(entry.path, "utf8").matchAll(directHelperCall)].length;
+      return matchCount === 0 || sanctionedModules.has(entry.path)
+        ? []
+        : [`${relative(sourceRoot, entry.path)} (${matchCount})`];
+    });
 }
 
 function usageCapability(providerId: UsageProviderId): ProviderCapabilityMetadata {
@@ -236,6 +260,36 @@ describe("@ai-workbench/provider-adapters public surface", () => {
   });
 });
 
+describe("provider request-helper census", () => {
+  it("routes every current provider HTTP helper call through the only sanctioned wrapper", () => {
+    const expectedGovernedCalls = new Map<string, number>([
+      ["providers/usage/zai-coding-plan/index.ts", 1],
+      ["providers/usage/minimax/index.ts", 1],
+      ["providers/usage/codex/index.ts", 2],
+      ["providers/usage/claude-code/index.ts", 1],
+      ["providers/balance/anthropic-api/index.ts", 1],
+      ["providers/balance/openai-api/index.ts", 1],
+      ["providers/balance/jina/index.ts", 1],
+      ["providers/balance/tavily/index.ts", 1],
+      ["providers/balance/speechmatics/index.ts", 1],
+      ["providers/balance/elevenlabs/index.ts", 1],
+      ["providers/balance/runpod/index.ts", 2],
+      ["providers/balance/deepseek/index.ts", 1],
+      ["providers/balance/deepgram/index.ts", 2],
+      ["providers/balance/fal/index.ts", 1],
+      ["providers/balance/exa/index.ts", 2],
+      ["providers/balance/moonshot/index.ts", 1],
+    ]);
+
+    expect([...expectedGovernedCalls.values()].reduce((total, count) => total + count, 0)).toBe(20);
+    expect(directProviderHelperCallLocations()).toEqual([]);
+
+    for (const [modulePath, expectedCount] of expectedGovernedCalls) {
+      expect(countGovernedHelperCalls(join(sourceRoot, modulePath)), modulePath).toBe(expectedCount);
+    }
+  });
+});
+
 const ANTHROPIC_SECRET = "sk-ant-fixture-secret-value";
 
 function anthropicCostReportBody(overrides?: Record<string, unknown>): unknown {
@@ -281,6 +335,177 @@ function recordingHttpClientLayer(
   );
 }
 
+const CompositeAttemptSchema = Schema.Struct({
+  step: Schema.String,
+});
+
+describe("governed provider HTTP attempts", () => {
+  it("keeps a declared source result typed inside the adapter projection seam", async () => {
+    const request = usageRequest("claude-code", "five-hour");
+    const operation = defineAdapterSourceOperation({
+      sourceIdentity: "fixture-source",
+      normalizedRequestVariant: "five-hour",
+      source: () => Effect.succeed({ utilization: 42 }),
+      project: (sourceResult, sourceRequest) =>
+        Effect.succeed<NormalizedSnapshot>({
+          familyId: "usage",
+          providerId: "claude-code",
+          metricKind: "usage-percent",
+          metricDirection: "upper-bound",
+          unit: "percent",
+          coverage: { kind: "rolling-window", window: sourceRequest.keyParts.windowOrPeriod as UsageWindowId },
+          value: sourceResult.utilization,
+          fetchedAtEpochMs: sourceRequest.startedAtEpochMs,
+        }),
+    });
+
+    const projection = await Effect.runPromise(operation.project({ utilization: 42 }, request));
+
+    expect(projection).toMatchObject({
+      providerId: "claude-code",
+      coverage: { kind: "rolling-window", window: "five-hour" },
+      value: 42,
+    });
+  });
+
+  it("starts a helper only with an installed permit context", async () => {
+    let starts = 0;
+    const httpLayer = recordingHttpClientLayer([], (request) => {
+      starts += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify({ step: "ungoverned-compatibility" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+    });
+
+    const result = await Effect.runPromise(
+      governedRequestJsonSchema(
+        { url: "https://provider.example.test/compatibility" },
+        CompositeAttemptSchema,
+      ).pipe(
+        Effect.provide(httpLayer),
+        Effect.provideService(ProviderAdapterAttemptContext, {
+          attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) => operation,
+          reportRateLimit: () => Effect.void,
+        }),
+      ),
+    );
+
+    expect(result).toEqual({ step: "ungoverned-compatibility" });
+    expect(starts).toBe(1);
+  });
+
+  it("obtains a fresh permit immediately before every JSON call in a composite source operation", async () => {
+    const events: string[] = [];
+    const context = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          events.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+    let responseNumber = 0;
+    const httpLayer = recordingHttpClientLayer([], (request) => {
+      responseNumber += 1;
+      events.push(`http-${responseNumber}`);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify({ step: `response-${responseNumber}` }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const first = yield* governedRequestJsonSchema(
+          { url: "https://provider.example.test/first" },
+          CompositeAttemptSchema,
+        );
+        const second = yield* governedRequestJsonSchema(
+          { url: "https://provider.example.test/second" },
+          CompositeAttemptSchema,
+        );
+        return { first, second };
+      }).pipe(
+        Effect.provide(httpLayer),
+        Effect.provideService(ProviderAdapterAttemptContext, context),
+      ),
+    );
+
+    expect(result).toEqual({ first: { step: "response-1" }, second: { step: "response-2" } });
+    expect(events).toEqual(["permit", "http-1", "permit", "http-2"]);
+  });
+
+  it("does not start a later composite HTTP call after the active context observes a 429", async () => {
+    const events: string[] = [];
+    let blockedFailure: unknown;
+    const context = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.suspend(() => {
+          if (blockedFailure !== undefined) {
+            events.push("blocked");
+            return Effect.fail(blockedFailure as E);
+          }
+          events.push("permit");
+          return operation.pipe(
+            Effect.tapError((failure) =>
+              Effect.sync(() => {
+                blockedFailure = failure;
+              }),
+            ),
+          );
+        }),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+    let starts = 0;
+    const httpLayer = recordingHttpClientLayer([], (request) => {
+      starts += 1;
+      events.push(`http-${starts}`);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify({ error: "rate limited" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "60" },
+          }),
+        ),
+      );
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Effect.either(
+          governedRequestJsonSchema(
+            { url: "https://provider.example.test/first" },
+            CompositeAttemptSchema,
+          ),
+        );
+        return yield* Effect.either(
+          governedRequestJsonSchema(
+            { url: "https://provider.example.test/second" },
+            CompositeAttemptSchema,
+          ),
+        );
+      }).pipe(
+        Effect.provide(httpLayer),
+        Effect.provideService(ProviderAdapterAttemptContext, context),
+      ),
+    );
+
+    expect(starts).toBe(1);
+    expect(events).toEqual(["permit", "http-1", "blocked"]);
+  });
+});
+
 function respondJson(status: number, body: unknown, headers?: Readonly<Record<string, string>>): FakeExecute {
   return (request) =>
     Effect.succeed(
@@ -294,9 +519,16 @@ function respondJson(status: number, body: unknown, headers?: Readonly<Record<st
     );
 }
 
-function anthropicEffectSourceFetch(captured: HttpClientRequest.HttpClientRequest[], execute: FakeExecute) {
+function anthropicEffectSourceFetch(
+  captured: HttpClientRequest.HttpClientRequest[],
+  execute: FakeExecute,
+  attemptContext?: ProviderAdapterAttemptContext,
+) {
+  const effectFetch = anthropicApiBalanceProviderModule.createSourceFetchEffect(anthropicEffectAdapterInput());
   return bridgeEffectSchedulerFetch(
-    anthropicApiBalanceProviderModule.createSourceFetchEffect(anthropicEffectAdapterInput()),
+    attemptContext === undefined
+      ? effectFetch
+      : (request) => effectFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attemptContext)),
     recordingHttpClientLayer(captured, execute),
   );
 }
@@ -824,9 +1056,13 @@ function claudeCodeEffectSourceFetch(
   execute: FakeExecute,
   readCredential: () => Promise<ClaudeCodeCredentialResult>,
   now: () => number = () => 2_000,
+  attemptContext?: ProviderAdapterAttemptContext,
 ) {
+  const effectFetch = claudeCodeUsageProviderModule.createSourceFetchEffect(claudeCodeEffectAdapterInput(readCredential, now));
   return bridgeEffectSchedulerFetch(
-    claudeCodeUsageProviderModule.createSourceFetchEffect(claudeCodeEffectAdapterInput(readCredential, now)),
+    attemptContext === undefined
+      ? effectFetch
+      : (request) => effectFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attemptContext)),
     recordingHttpClientLayer(captured, execute),
   );
 }
@@ -909,6 +1145,14 @@ describe("claude-code Effect-native usage adapter", () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const readTokens = ["fixture-stale-token", "fixture-fresh-token"];
     let reads = 0;
+    const permitEvents: string[] = [];
+    const attemptContext = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          permitEvents.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
     const runFetch = claudeCodeEffectSourceFetch(
       captured,
       respondJsonSequence([
@@ -920,6 +1164,8 @@ describe("claude-code Effect-native usage adapter", () => {
         reads += 1;
         return { ok: true, accessToken };
       },
+      () => 2_000,
+      attemptContext,
     );
 
     const result = await runFetch(usageRequest("claude-code", "five-hour"));
@@ -927,6 +1173,7 @@ describe("claude-code Effect-native usage adapter", () => {
     // One initial read (token not stale) + one 401-triggered re-read = 2 reads, 2 HTTP calls.
     expect(reads).toBe(2);
     expect(captured).toHaveLength(2);
+    expect(permitEvents).toEqual(["permit", "permit"]);
     expect(PlatformHeaders.get(captured[1]!.headers, "authorization")).toStrictEqual(
       Option.some("Bearer fixture-fresh-token"),
     );
@@ -1001,6 +1248,10 @@ describe("claude-code Effect-native usage adapter", () => {
     }).pipe(
       Effect.provide(recordingHttpClientLayer(captured, respondJson(200, { five_hour: { utilization: 42 } }))),
       Effect.provide(TestContext.TestContext),
+      Effect.provideService(ProviderAdapterAttemptContext, {
+        attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) => operation,
+        reportRateLimit: () => Effect.void,
+      }),
     );
 
     const snapshot = await Effect.runPromise(program);
@@ -2997,6 +3248,7 @@ function migratedEffectSourceFetch(
   baseUrl: string,
   captured: HttpClientRequest.HttpClientRequest[],
   execute: FakeExecute,
+  attemptContext?: ProviderAdapterAttemptContext,
 ) {
   const effectFetch = module.createSourceFetchEffect?.({
     providerId,    baseUrl,
@@ -3006,7 +3258,12 @@ function migratedEffectSourceFetch(
   if (effectFetch === undefined) {
     throw new Error(`${providerId} must expose createSourceFetchEffect (Effect-native)`);
   }
-  return bridgeEffectSchedulerFetch(effectFetch, recordingHttpClientLayer(captured, execute));
+  return bridgeEffectSchedulerFetch(
+    attemptContext === undefined
+      ? effectFetch
+      : (request) => effectFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attemptContext)),
+    recordingHttpClientLayer(captured, execute),
+  );
 }
 
 const migratedJsonCases = [
@@ -3204,6 +3461,7 @@ function runpodFixedSeamFetch(
   captured: HttpClientRequest.HttpClientRequest[],
   execute: FakeExecute,
   nowMs: number,
+  attemptContext?: ProviderAdapterAttemptContext,
 ) {
   const effectFetch = runpodBalanceProviderModule.createSourceFetchEffect({
     providerId: "runpod",
@@ -3211,10 +3469,56 @@ function runpodFixedSeamFetch(
     resolveCredential: async () => ({ ok: true, value: { value: Redacted.make(MIGRATED_SECRET) } }),
     now: () => nowMs,
   });
-  return bridgeEffectSchedulerFetch(effectFetch, recordingHttpClientLayer(captured, execute));
+  return bridgeEffectSchedulerFetch(
+    attemptContext === undefined
+      ? effectFetch
+      : (request) => effectFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attemptContext)),
+    recordingHttpClientLayer(captured, execute),
+  );
 }
 
 describe("migrated multi-call Balance adapters", () => {
+  it("obtains one fresh permit per pagination, discovery, and dependent billing attempt", async () => {
+    const permits: string[] = [];
+    const attemptContext = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          permits.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+
+    await anthropicEffectSourceFetch(
+      [],
+      respondJsonSequence([
+        { body: anthropicCostReportBody({ has_more: true, next_page: "cursor-2" }) },
+        { body: anthropicCostReportBody() },
+      ]),
+      attemptContext,
+    )(balanceRequest("anthropic-api", "month-to-date"));
+
+    await migratedEffectSourceFetch(
+      deepgramBalanceProviderModule,
+      "deepgram",
+      "https://api.deepgram.com",
+      [],
+      respondJsonSequence([
+        { body: { projects: [{ project_id: "proj-fixture" }] } },
+        { body: { balances: [{ amount: 12.5, units: "usd" }] } },
+      ]),
+      attemptContext,
+    )(balanceRequest("deepgram"));
+
+    await runpodFixedSeamFetch(
+      [],
+      respondJsonSequence([{ body: [] }, { body: [] }]),
+      Date.UTC(2026, 6, 9),
+      attemptContext,
+    )(balanceRequest("runpod"));
+
+    expect(permits).toHaveLength(6);
+  });
+
   it("openai-api paginates the cost report and decodes the accumulated pages into a month-to-date spend snapshot", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = migratedEffectSourceFetch(

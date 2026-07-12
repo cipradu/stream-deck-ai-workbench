@@ -15,4 +15,5 @@ export * from "./severity.js";
 export * from "./implementation-status.js";
 export * from "./settings.js";
 export * from "./scheduler.js";
+export * from "./coordination.js";
 export * from "./renderer.js";

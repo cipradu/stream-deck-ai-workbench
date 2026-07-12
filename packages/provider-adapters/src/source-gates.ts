@@ -3,16 +3,16 @@ import { IMPLEMENTATION_STATUS_BEHAVIOR, type ProviderCapabilityMetadata } from 
 import type { SchedulerFetch } from "@ai-workbench/scheduler";
 import { Effect } from "effect";
 
-import type { AdapterFetchFailure, EffectBalanceSchedulerFetch, EffectUsageSchedulerFetch } from "./effect-fetch.js";
+import type { AdapterFetchFailure, EffectSchedulerFetch } from "./effect-fetch.js";
 import { gatedFailure, noSourceConfigured, unsupportedFetchFailure } from "./provider-failures.js";
 import type { CreateSourceGatedBalanceFetchInput, CreateSourceGatedUsageFetchInput } from "./types.js";
 
 export interface CreateSourceGatedUsageFetchEffectInput extends Omit<CreateSourceGatedUsageFetchInput, "sourceFetch"> {
-  readonly sourceFetch?: EffectUsageSchedulerFetch;
+  readonly sourceFetch?: EffectSchedulerFetch;
 }
 
 export interface CreateSourceGatedBalanceFetchEffectInput extends Omit<CreateSourceGatedBalanceFetchInput, "sourceFetch"> {
-  readonly sourceFetch?: EffectBalanceSchedulerFetch;
+  readonly sourceFetch?: EffectSchedulerFetch;
 }
 
 export function createSourceGatedUsageFetch(input: CreateSourceGatedUsageFetchInput): SchedulerFetch {
@@ -63,7 +63,7 @@ export function createSourceGatedBalanceFetch(input: CreateSourceGatedBalanceFet
  * Gated/unsupported/no-source states fail in the Effect error channel with the plain sanitized
  * failure; an allowed provider delegates to its Effect-native source fetch.
  */
-export function createSourceGatedUsageFetchEffect(input: CreateSourceGatedUsageFetchEffectInput): EffectUsageSchedulerFetch {
+export function createSourceGatedUsageFetchEffect(input: CreateSourceGatedUsageFetchEffectInput): EffectSchedulerFetch {
   return (request) => {
     if (
       request.keyParts.familyId !== "usage" ||
@@ -81,7 +81,7 @@ export function createSourceGatedUsageFetchEffect(input: CreateSourceGatedUsageF
   };
 }
 
-export function createSourceGatedBalanceFetchEffect(input: CreateSourceGatedBalanceFetchEffectInput): EffectBalanceSchedulerFetch {
+export function createSourceGatedBalanceFetchEffect(input: CreateSourceGatedBalanceFetchEffectInput): EffectSchedulerFetch {
   return (request) => {
     if (
       request.keyParts.familyId !== "balance" ||

@@ -1,8 +1,16 @@
 import type { BalanceProviderId } from "@ai-workbench/contracts";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+import { Effect } from "effect";
 
-import type { EffectBalanceSchedulerFetch } from "../../effect-fetch.js";
+import {
+  isGovernorBlocked,
+  schedulerFailureFromGovernorBlocked,
+  type EffectBalanceSchedulerFetch,
+  type EffectSchedulerFetch,
+} from "../../effect-fetch.js";
+import { ProviderAdapterAttemptContext } from "../../governed-request.js";
 import { unsupportedNormalizationFailure } from "../../provider-failures.js";
+import { executeAdapterSource } from "../../source-flight-runtime.js";
 import type {
   BalanceProviderAdapterBinding,
   BalanceProviderNormalizationResult,
@@ -67,8 +75,35 @@ export function normalizeBalanceProviderResponse(
  */
 export function createBalanceProviderSourceFetchEffect(
   input: CreateBalanceProviderSourceFetchInput,
-): EffectBalanceSchedulerFetch | undefined {
-  return balanceProviderModules
-    .find((providerModule) => providerModule.providerId === input.providerId)
-    ?.createSourceFetchEffect?.(input);
+): EffectSchedulerFetch | undefined {
+  const providerModule = balanceProviderModules.find((candidate) => candidate.providerId === input.providerId);
+  const sourceFetch = providerModule?.createSourceFetchEffect?.(input);
+  if (
+    sourceFetch === undefined ||
+    providerModule === undefined ||
+    input.sourceFlightRuntime === undefined ||
+    input.credentialProfileId === undefined ||
+    input.rateLimitDomain === undefined
+  ) {
+    return undefined;
+  }
+  const sourceFlightRuntime = input.sourceFlightRuntime;
+  const credentialProfileId = input.credentialProfileId;
+  const rateLimitDomain = input.rateLimitDomain;
+
+  return (request) =>
+    executeAdapterSource(
+      sourceFlightRuntime,
+      {
+        providerId: providerModule.providerId,
+        credentialProfileId,
+        rateLimitDomain,
+        sourceIdentity: providerModule.providerId,
+        normalizedRequestVariant: request.keyParts.windowOrPeriod ?? "current",
+      },
+      (attempts) => sourceFetch(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attempts)),
+    )
+      .pipe(
+        Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
+      );
 }

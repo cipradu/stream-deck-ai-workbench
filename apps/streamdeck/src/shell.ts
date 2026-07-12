@@ -16,6 +16,7 @@ import { Effect, Fiber, Schedule, type Duration, type ManagedRuntime } from "eff
 
 import { writeShellLog } from "./logging.js";
 import { displayInputFromFailure, renderDisplayInput } from "./renderer.js";
+import type { ProviderRequestRuntime } from "./runtime.js";
 import { createSchedulerFetchForActionSettings } from "./scheduler-fetch.js";
 import {
   legacySeverityProfileForBalanceInput,
@@ -44,6 +45,7 @@ export interface GlobalSettingsPort {
 
 export interface StreamDeckShellOptions {
   readonly scheduler: Scheduler;
+  readonly providerRequestRuntime: ProviderRequestRuntime;
   readonly globalSettings: GlobalSettingsPort;
   readonly logSink: StreamDeckLogSink;
   readonly now?: () => number;
@@ -59,6 +61,7 @@ type KeyFeedback = "alert" | "none" | "ok";
 
 export class StreamDeckShell {
   private readonly scheduler: Scheduler;
+  private readonly providerRequestRuntime: ProviderRequestRuntime;
   private readonly globalSettings: GlobalSettingsPort;
   private readonly logSink: StreamDeckLogSink;
   private readonly now: () => number;
@@ -71,6 +74,7 @@ export class StreamDeckShell {
 
   constructor(options: StreamDeckShellOptions) {
     this.scheduler = options.scheduler;
+    this.providerRequestRuntime = options.providerRequestRuntime;
     this.globalSettings = options.globalSettings;
     this.logSink = options.logSink;
     // Imperative-shell wall-clock: Effect `Clock` owns time INSIDE the foundation, but this
@@ -294,6 +298,13 @@ export class StreamDeckShell {
     if (change.value.kind === "unchanged") {
       return;
     }
+    if (change.value.kind === "provider-source-affecting") {
+      await Promise.all(
+        change.value.affectedCredentialProfiles.map((profile) =>
+          this.providerRequestRuntime.advanceCredentialGeneration(profile.profileId),
+        ),
+      );
+    }
     await this.handleGlobalSettingsSchedulerChange(
       change.value,
       this.schedulerKeysAffectedByGlobalSettingsChange(change.value.affectedCredentialProfiles),
@@ -332,6 +343,7 @@ export class StreamDeckShell {
       fetch: createSchedulerFetchForActionSettings(settings, {
         logSink: this.logSink,
         readGlobalSettings: () => this.globalSettings.read(),
+        sourceFlightRuntime: this.providerRequestRuntime.sourceFlightRuntime,
       }),
       instanceId: action.id,
       keyParts: settings.schedulerKeyParts,

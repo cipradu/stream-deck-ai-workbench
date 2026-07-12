@@ -2,7 +2,7 @@ import { Effect, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
 import { createSanitizedFailure } from "@ai-workbench/errors";
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { createUsageProviderAdapterBinding } from "../../../binding-helpers.js";
@@ -11,6 +11,7 @@ import {
   type AdapterFetchFailure,
   type EffectUsageSchedulerFetch,
 } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { abortSignalForScheduler } from "../../../live-http.js";
 import { noSourceConfigured, semanticValidationFetchFailure } from "../../../provider-failures.js";
 import type { CreateUsageProviderSourceFetchInput, UsageProviderAdapterBinding } from "../../../types.js";
@@ -77,7 +78,7 @@ export const zaiCodingPlanUsageProviderModule = {
         const signal = abortSignalForScheduler(request.signal);
         const fetchedAtEpochMs = input.now?.() ?? request.startedAtEpochMs;
 
-        const body = yield* requestJsonSchema(
+        const body = yield* governedRequestJsonSchema(
           {
             url: new URL("/api/monitor/usage/quota/limit", input.baseUrl),
             headers: {

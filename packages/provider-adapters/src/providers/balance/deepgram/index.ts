@@ -1,15 +1,17 @@
 import { Effect, Redacted, Schema } from "effect";
 
-import { DEFAULT_HTTP_TIMEOUT_MS, requestJsonSchema } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 
 import { balanceSnapshotResult, parseBalanceResponse } from "../../../balance-normalization.js";
 import { createBalanceProviderAdapterBinding } from "../../../binding-helpers.js";
 import {
   schedulerFailureFromTagged,
+  isGovernorBlocked,
   type AdapterFetchFailure,
   type EffectBalanceSchedulerFetch,
 } from "../../../effect-fetch.js";
+import { governedRequestJsonSchema } from "../../../governed-request.js";
 import { abortSignalForScheduler } from "../../../live-http.js";
 import { credentialResolutionFailure, isClientErrorFailure, semanticValidationFailure } from "../../../provider-failures.js";
 import type {
@@ -69,7 +71,7 @@ export const deepgramBalanceProviderModule = {
         // error tap (a nested function), which would defeat TS narrowing on it directly.
         let projectId = cachedProjectId;
         if (projectId === undefined) {
-          const projectsBody = yield* requestJsonSchema(
+          const projectsBody = yield* governedRequestJsonSchema(
             { url: new URL("/v1/projects", input.baseUrl), headers, signal },
             // The discovery response has no vendor schema in the original adapter; it applies
             // the `firstProjectId` heuristic to the raw decoded JSON, preserved verbatim here.
@@ -88,7 +90,7 @@ export const deepgramBalanceProviderModule = {
           cachedProjectId = projectId;
         }
 
-        const balancesBody = yield* requestJsonSchema(
+        const balancesBody = yield* governedRequestJsonSchema(
           { url: new URL(`/v1/projects/${encodeURIComponent(projectId)}/balances`, input.baseUrl), headers, signal },
           DeepgramBalancesResponseSchema,
           { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
@@ -98,7 +100,7 @@ export const deepgramBalanceProviderModule = {
           // call re-discovers. See `isClientErrorFailure` for the taxonomy-to-4xx mapping.
           Effect.tapError((taggedError) =>
             Effect.sync(() => {
-              if (isClientErrorFailure(taggedError)) {
+              if (!isGovernorBlocked(taggedError) && isClientErrorFailure(taggedError)) {
                 cachedProjectId = undefined;
               }
             }),
