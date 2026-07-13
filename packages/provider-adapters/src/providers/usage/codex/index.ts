@@ -23,22 +23,22 @@ import type {
 
 const providerId = "codex" as const;
 const CREDENTIAL_BOUNDARY = "provider-adapters";
+const CODEX_USAGE_WINDOW_DURATIONS = {
+  "five-hour": { seconds: 18_000, minutes: 300 },
+  "seven-day": { seconds: 604_800, minutes: 10_080 },
+} as const satisfies Record<"five-hour" | "seven-day", { readonly seconds: number; readonly minutes: number }>;
+
+const CodexRateLimitWindowSchema = Schema.Struct({
+  limit_window_seconds: Schema.Number,
+  used_percent: Schema.Number,
+  reset_at: Schema.optional(Schema.Number),
+});
 
 const CodexUsageResponseSchema = Schema.Struct({
   rate_limit: Schema.optional(
     Schema.Struct({
-      primary_window: Schema.optional(
-        Schema.Struct({
-          used_percent: Schema.Number,
-          reset_at: Schema.optional(Schema.Number),
-        }),
-      ),
-      secondary_window: Schema.optional(
-        Schema.Struct({
-          used_percent: Schema.Number,
-          reset_at: Schema.optional(Schema.Number),
-        }),
-      ),
+      primary_window: Schema.optional(Schema.NullOr(CodexRateLimitWindowSchema)),
+      secondary_window: Schema.optional(Schema.NullOr(CodexRateLimitWindowSchema)),
     }),
   ),
   // Codex credit-pool balance from the SAME /backend-api/wham/usage response.
@@ -537,8 +537,24 @@ function liveUsageWindowForResponse(
   response: CodexUsageResponse,
   window: UsageWindowId,
 ): { readonly value: number; readonly resetsAtEpochMs?: number } | undefined {
-  const rawWindow = window === "five-hour" ? response.rate_limit?.primary_window : response.rate_limit?.secondary_window;
-  if (rawWindow === undefined || !Number.isFinite(rawWindow.used_percent)) {
+  const requestedSeconds = codexWindowDurationSeconds(window);
+  if (requestedSeconds === undefined) {
+    return undefined;
+  }
+
+  const matches = [response.rate_limit?.primary_window, response.rate_limit?.secondary_window].filter(
+    (candidate): candidate is NonNullable<typeof candidate> =>
+      candidate !== undefined &&
+      candidate !== null &&
+      Number.isFinite(candidate.limit_window_seconds) &&
+      candidate.limit_window_seconds === requestedSeconds,
+  );
+  if (matches.length !== 1) {
+    return undefined;
+  }
+
+  const rawWindow = matches[0];
+  if (!Number.isFinite(rawWindow.used_percent)) {
     return undefined;
   }
 
@@ -550,6 +566,10 @@ function liveUsageWindowForResponse(
       ? { resetsAtEpochMs: resetAtSeconds * 1000 }
       : {}),
   };
+}
+
+function codexWindowDurationSeconds(window: UsageWindowId): number | undefined {
+  return window === "five-hour" || window === "seven-day" ? CODEX_USAGE_WINDOW_DURATIONS[window].seconds : undefined;
 }
 
 /**

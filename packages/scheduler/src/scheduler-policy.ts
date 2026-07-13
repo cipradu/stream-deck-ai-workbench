@@ -1,3 +1,4 @@
+import { MAX_RETRY_AFTER_SECONDS } from "@ai-workbench/http";
 import { Duration, Schedule } from "effect";
 
 export const SCHEDULER_BACKOFF_POLICY = {
@@ -8,7 +9,7 @@ export const SCHEDULER_BACKOFF_POLICY = {
   rateLimit: {
     initialDelayMs: 60_000,
     maxDelayMs: 600_000,
-    maxRetryAfterMs: 3_600_000,
+    maxRetryAfterMs: MAX_RETRY_AFTER_SECONDS * 1_000,
   },
   stale: {
     ageMultiplier: 2,

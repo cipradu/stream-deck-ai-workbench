@@ -29,6 +29,8 @@ const RAW_NEEDLES = {
   responseBody: "raw response body secret",
 } as const;
 
+const THIRTY_MINUTE_RETRY_AFTER_SECONDS = 1_800;
+
 const RemainingSchema = Schema.Struct({ remaining: Schema.Number });
 
 type ExecuteFake = (
@@ -231,6 +233,25 @@ describe("@ai-workbench/http Effect-native surface", () => {
     if (tagged._tag === "RateLimited") {
       expect(tagged.retryAfterSeconds).toBe(MAX_RETRY_AFTER_SECONDS);
     }
+  });
+
+  it.each([
+    [1_799, 1_799],
+    [1_800, 1_800],
+    [1_801, THIRTY_MINUTE_RETRY_AFTER_SECONDS],
+  ] as const)("classifies fake 429 Retry-After %i as bounded sanitized %i", async (inputSeconds, expectedSeconds) => {
+    const exit = await runSurface(
+      executeRequest(buildHttpRequest(baseRequest)),
+      respond(429, RAW_NEEDLES.responseBody, { "retry-after": String(inputSeconds) }),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("RateLimited");
+    if (tagged._tag === "RateLimited") {
+      expect(tagged.retryAfterSeconds).toBe(expectedSeconds);
+    }
+    const serialized = JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged));
+    expect(serialized).not.toContain(RAW_NEEDLES.responseBody);
+    expect(serialized).not.toContain("fake-token");
   });
 
   it("maps a deadline breach to Timeout via the one-shot Effect.timeout", async () => {
