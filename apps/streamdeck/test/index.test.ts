@@ -1514,9 +1514,23 @@ describe("Codex session-file tail parsing (old fallback shape)", () => {
   it("extracts the LAST rate_limits line, skips malformed lines, and keeps the file timestamp", () => {
     const lines = [
       JSON.stringify({ type: "other", payload: { note: "no limits here" } }),
-      JSON.stringify({ payload: { rate_limits: { primary: { used_percent: 10 }, secondary: { used_percent: 3 } } } }),
+      JSON.stringify({
+        payload: {
+          rate_limits: {
+            primary: { window_minutes: 300, used_percent: 10 },
+            secondary: { window_minutes: 10_080, used_percent: 3 },
+          },
+        },
+      }),
       '{ broken json with "rate_limits" inside',
-      JSON.stringify({ payload: { rate_limits: { primary: { used_percent: 42 }, secondary: { used_percent: 12 } } } }),
+      JSON.stringify({
+        payload: {
+          rate_limits: {
+            primary: { window_minutes: 300, used_percent: 42 },
+            secondary: { window_minutes: 10_080, used_percent: 12 },
+          },
+        },
+      }),
     ].join("\n");
 
     expect(parseLastRateLimitsLine(lines, 5_000)).toEqual({
@@ -1526,12 +1540,71 @@ describe("Codex session-file tail parsing (old fallback shape)", () => {
     });
   });
 
+  it("derives Codex session windows by exact minutes across normal, reversed, and temporary slot placement", () => {
+    const normal = JSON.stringify({
+      payload: {
+        rate_limits: {
+          primary: { window_minutes: 300, used_percent: 42, resets_at: 1_805_000_000 },
+          secondary: { window_minutes: 10_080, used_percent: 12, resets_at: 1_806_000_000 },
+        },
+      },
+    });
+    expect(parseLastRateLimitsLine(normal, 5_000)).toEqual({
+      fetchedAtEpochMs: 5_000,
+      fiveHourPercent: 42,
+      sevenDayPercent: 12,
+      fiveHourResetsAtEpochMs: 1_805_000_000_000,
+      sevenDayResetsAtEpochMs: 1_806_000_000_000,
+    });
+
+    const reversed = JSON.stringify({
+      payload: {
+        rate_limits: {
+          primary: { window_minutes: 10_080, used_percent: 12, resets_at: 1_806_000_000 },
+          secondary: { window_minutes: 300, used_percent: 42, resets_at: 1_805_000_000 },
+        },
+      },
+    });
+    expect(parseLastRateLimitsLine(reversed, 5_000)).toEqual({
+      fetchedAtEpochMs: 5_000,
+      fiveHourPercent: 42,
+      sevenDayPercent: 12,
+      fiveHourResetsAtEpochMs: 1_805_000_000_000,
+      sevenDayResetsAtEpochMs: 1_806_000_000_000,
+    });
+
+    const temporary = JSON.stringify({
+      payload: {
+        rate_limits: {
+          primary: { window_minutes: 10_080, used_percent: 7, resets_at: 1_806_000_000 },
+          secondary: null,
+        },
+      },
+    });
+    expect(parseLastRateLimitsLine(temporary, 5_000)).toEqual({
+      fetchedAtEpochMs: 5_000,
+      sevenDayPercent: 7,
+      sevenDayResetsAtEpochMs: 1_806_000_000_000,
+    });
+  });
+
+  it("omits Codex session windows with missing, unsupported, duplicate, or malformed minute durations", () => {
+    for (const rate_limits of [
+      { primary: { used_percent: 42 } },
+      { primary: { window_minutes: 60, used_percent: 42 } },
+      { primary: { window_minutes: 300, used_percent: 42 }, secondary: { window_minutes: 300, used_percent: 43 } },
+      { primary: { window_minutes: "300", used_percent: 42 } },
+    ]) {
+      expect(parseLastRateLimitsLine(JSON.stringify({ payload: { rate_limits } }), 5_000)).toBeUndefined();
+    }
+  });
+
   it("carries per-window resets_at (epoch seconds) as reset milliseconds", () => {
     const line = JSON.stringify({
       payload: {
         rate_limits: {
-          primary: { used_percent: 42, resets_at: 1_805_000_000 },
-          secondary: { used_percent: 12, resets_at: 1_806_000_000 },
+          primary: { window_minutes: 300, used_percent: 42, resets_at: 1_805_000_000 },
+          secondary: { window_minutes: 10_080, used_percent: 12, resets_at: 1_806_000_000 },
         },
       },
     });
@@ -1549,7 +1622,10 @@ describe("Codex session-file tail parsing (old fallback shape)", () => {
     expect(parseLastRateLimitsLine(JSON.stringify({ type: "other" }), 5_000)).toBeUndefined();
     expect(parseLastRateLimitsLine("", 5_000)).toBeUndefined();
     expect(
-      parseLastRateLimitsLine(JSON.stringify({ payload: { rate_limits: { primary: { used_percent: "not-a-number" } } } }), 5_000),
+      parseLastRateLimitsLine(
+        JSON.stringify({ payload: { rate_limits: { primary: { window_minutes: 300, used_percent: "not-a-number" } } } }),
+        5_000,
+      ),
     ).toBeUndefined();
   });
 });

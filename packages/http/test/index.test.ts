@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { MAX_RETRY_AFTER_SECONDS, packageName, parseRetryAfter } from "../src/index.js";
 
+const THIRTY_MINUTE_RETRY_AFTER_SECONDS = 1_800;
+
 // `@effect/platform` (FetchHttpClient) is the
 // ADOPTED boundary; `@effect/platform-node`, `@effect/rpc`, `@effect/sql`,
 // `@effect/cluster`, `undici`, and Axios remain rejected. The tokens are assembled
@@ -29,14 +31,36 @@ describe("@ai-workbench/http package identity", () => {
 });
 
 describe("@ai-workbench/http Retry-After parsing", () => {
+  it("exports the canonical 30-minute Retry-After maximum", () => {
+    expect(MAX_RETRY_AFTER_SECONDS).toBe(THIRTY_MINUTE_RETRY_AFTER_SECONDS);
+  });
+
   it("parses delta-seconds independent of the clock", () => {
     expect(parseRetryAfter("30", 0)).toBe(30);
+  });
+
+  it.each([
+    [1_799, 1_799],
+    [1_800, 1_800],
+    [1_801, THIRTY_MINUTE_RETRY_AFTER_SECONDS],
+  ] as const)("bounds delta-seconds %i to %i", (inputSeconds, expectedSeconds) => {
+    expect(parseRetryAfter(String(inputSeconds), 0)).toBe(expectedSeconds);
   });
 
   it("parses an HTTP-date relative to the supplied now", () => {
     const now = Date.UTC(2026, 6, 5, 16, 0, 0);
     const retryDate = new Date(now + 125_000).toUTCString();
     expect(parseRetryAfter(retryDate, now)).toBe(125);
+  });
+
+  it.each([
+    [1_799, 1_799],
+    [1_800, 1_800],
+    [1_801, THIRTY_MINUTE_RETRY_AFTER_SECONDS],
+  ] as const)("bounds HTTP-date retry guidance %i seconds ahead to %i", (inputSeconds, expectedSeconds) => {
+    const now = Date.UTC(2026, 6, 5, 16, 0, 0);
+    const retryDate = new Date(now + inputSeconds * 1_000).toUTCString();
+    expect(parseRetryAfter(retryDate, now)).toBe(expectedSeconds);
   });
 
   it("caps excessive values at the policy maximum", () => {

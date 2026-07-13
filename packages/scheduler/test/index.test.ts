@@ -1,16 +1,26 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { serializeSchedulerKey, type ErrorCategory, type NormalizedSnapshot, type SchedulerKeyParts } from "@ai-workbench/contracts";
+import {
+  serializeSchedulerKey,
+  type ErrorCategory,
+  type NormalizedSnapshot,
+  type SchedulerKeyParts,
+  type SourceRequestIdentityInput,
+} from "@ai-workbench/contracts";
 import { createSanitizedFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import type { ActionSettingsChangeClassification, GlobalSettingsChangeClassification } from "@ai-workbench/settings";
 import { Clock, Deferred, Duration, Effect, Layer, ManagedRuntime, Random, Ref, TestClock, TestContext } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+  ProviderRequestGovernor,
+  ProviderRequestGovernorLive,
   SCHEDULER_BACKOFF_POLICY,
   createScheduler,
   packageName,
+  type GovernorBlocked,
+  type ProviderRequestGovernorService,
   type SchedulerEffectFetch,
   type SchedulerFetchFailure,
 } from "../src/index.js";
@@ -88,6 +98,88 @@ const otherKeyParts: SchedulerKeyParts = {
 };
 const otherKey = serializeSchedulerKey(otherKeyParts);
 
+const sameScopeOtherKeyParts: SchedulerKeyParts = {
+  ...keyParts,
+  metricVariant: "alternate-balance",
+};
+const sameScopeOtherKey = serializeSchedulerKey(sameScopeOtherKeyParts);
+
+function sourceRequestIdentity(
+  parts: SchedulerKeyParts,
+  sourceIdentity: string,
+  normalizedRequestVariant: string = parts.windowOrPeriod ?? "current",
+): SourceRequestIdentityInput {
+  return {
+    rateLimitScope: {
+      providerId: parts.providerId,
+      credentialProfileId: parts.credentialProfileId,
+      credentialGeneration: 0,
+      rateLimitDomain: "provider-profile",
+    },
+    sourceIdentity,
+    normalizedRequestVariant,
+  };
+}
+
+function schedulerFailureFromGovernorBlocked(blocked: GovernorBlocked): SchedulerFetchFailure {
+  return {
+    failure: blocked.failure,
+    ...(blocked.retryAfterSeconds === undefined ? {} : { retry: { retryAfterSeconds: blocked.retryAfterSeconds } }),
+  };
+}
+
+function governedFetch(
+  governor: ProviderRequestGovernorService,
+  sourceIdentity: SourceRequestIdentityInput,
+  onProviderStart: () => void,
+): SchedulerEffectFetch {
+  return (request) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const lease = yield* governor.acquireSource(sourceIdentity);
+        const permit = yield* lease.acquireAttempt();
+        onProviderStart();
+        yield* permit.release();
+        yield* lease.settle({ kind: "succeeded" });
+        return snapshot({ fetchedAtEpochMs: request.startedAtEpochMs });
+      }),
+    ).pipe(Effect.mapError(schedulerFailureFromGovernorBlocked));
+}
+
+function acquireGovernedAttempt(
+  governor: ProviderRequestGovernorService,
+  sourceIdentity: SourceRequestIdentityInput,
+  onProviderStart: () => void,
+): Effect.Effect<void, GovernorBlocked, never> {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const lease = yield* governor.acquireSource(sourceIdentity);
+      const permit = yield* lease.acquireAttempt();
+      onProviderStart();
+      yield* permit.release();
+      yield* lease.settle({ kind: "succeeded" });
+    }),
+  );
+}
+
+function armGovernedCooldown(
+  governor: ProviderRequestGovernorService,
+  sourceIdentity: SourceRequestIdentityInput,
+  retryAfterSeconds: number,
+  onProviderStart: () => void,
+): Effect.Effect<void, GovernorBlocked, never> {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const lease = yield* governor.acquireSource(sourceIdentity);
+      const permit = yield* lease.acquireAttempt();
+      onProviderStart();
+      yield* permit.release();
+      yield* lease.reportRateLimit({ retryAfterSeconds });
+      yield* lease.settle({ kind: "failed" });
+    }),
+  );
+}
+
 /**
  * Advances the `TestClock` by EXACTLY the time remaining until the fiber's currently-armed healthy
  * poll. The healthy cadence is jittered 0-20%, so tests can no longer advance a hard-coded
@@ -159,7 +251,7 @@ describe("@ai-workbench/scheduler public surface", () => {
     expect(typeof createScheduler).toBe("function");
     expect(SCHEDULER_BACKOFF_POLICY).toMatchObject({
       transient: { initialDelayMs: 30_000, maxDelayMs: 300_000 },
-      rateLimit: { initialDelayMs: 60_000, maxDelayMs: 600_000, maxRetryAfterMs: 3_600_000 },
+      rateLimit: { initialDelayMs: 60_000, maxDelayMs: 600_000, maxRetryAfterMs: 1_800_000 },
       stale: { ageMultiplier: 2, maxDisplayMs: 86_400_000 },
       jitter: { minRatio: 0, maxRatio: 0.2 },
     });
@@ -468,7 +560,7 @@ describe("failure back-off (Effect Schedule under TestClock)", () => {
     expect(run1[0]).toBe(run2[0]);
   });
 
-  it("(3) backs off at the rate-limit base->cap and honors a sanitized Retry-After (capped at 1h)", async () => {
+  it("(3) backs off at the rate-limit base->cap and honors exact sanitized Retry-After boundaries", async () => {
     // (a) rate-limit WITHOUT Retry-After -> exponential from the 60s base.
     const runtimeA = makeJitterRuntime(7);
     const schedulerA = createScheduler({ runtime: runtimeA });
@@ -484,39 +576,29 @@ describe("failure back-off (Effect Schedule under TestClock)", () => {
     expect(schedulerA.getOutput(key).backoff!.delayMs).toBeLessThanOrEqual(RATE_LIMIT_CAP);
     await schedulerA.shutdown();
 
-    // (b) rate-limit WITH Retry-After -> honored exactly (not the exponential value).
-    const runtimeB = makeJitterRuntime(7);
-    const schedulerB = createScheduler({ runtime: runtimeB });
-    schedulerB.activate({
-      instanceId: "instance-a",
-      keyParts,
-      refreshIntervalSeconds: 600,
-      fetch: failFetch({ failure: failure("rate-limited"), retry: { retryAfterSeconds: 120 } }),
-    });
-    await macrotask();
-    expect(schedulerB.getOutput(key).backoff).toMatchObject({
-      class: "rate-limit",
-      attempt: 1,
-      delayMs: 120_000,
-      retryAfterApplied: true,
-    });
-    await schedulerB.shutdown();
-
-    // (c) a Retry-After beyond 1h is capped at the 1h maximum.
-    const runtimeC = makeJitterRuntime(7);
-    const schedulerC = createScheduler({ runtime: runtimeC });
-    schedulerC.activate({
-      instanceId: "instance-a",
-      keyParts,
-      refreshIntervalSeconds: 600,
-      fetch: failFetch({ failure: failure("rate-limited"), retry: { retryAfterSeconds: 7_200 } }),
-    });
-    await macrotask();
-    expect(schedulerC.getOutput(key).backoff).toMatchObject({
-      delayMs: SCHEDULER_BACKOFF_POLICY.rateLimit.maxRetryAfterMs, // 3_600_000 (1h)
-      retryAfterApplied: true,
-    });
-    await schedulerC.shutdown();
+    const retryAfterCases = [
+      { retryAfterSeconds: 1_799, expectedDelayMs: 1_799_000 },
+      { retryAfterSeconds: 1_800, expectedDelayMs: 1_800_000 },
+      { retryAfterSeconds: 1_801, expectedDelayMs: 1_800_000 },
+    ] as const;
+    for (const { retryAfterSeconds, expectedDelayMs } of retryAfterCases) {
+      const runtime = makeJitterRuntime(7);
+      const scheduler = createScheduler({ runtime });
+      scheduler.activate({
+        instanceId: `instance-${retryAfterSeconds}`,
+        keyParts,
+        refreshIntervalSeconds: 600,
+        fetch: failFetch({ failure: failure("rate-limited"), retry: { retryAfterSeconds } }),
+      });
+      await macrotask();
+      expect(scheduler.getOutput(key).backoff).toMatchObject({
+        class: "rate-limit",
+        attempt: 1,
+        delayMs: expectedDelayMs,
+        retryAfterApplied: true,
+      });
+      await scheduler.shutdown();
+    }
   });
 
   it("(4) resets to the healthy (jittered) cadence after a success following failures", async () => {
@@ -743,6 +825,72 @@ describe("manual refresh signalling (race the sleep, respect back-off)", () => {
     expect(scheduler.getOutput(key).backoff).toMatchObject({ class: "transient", attempt: 2 });
 
     await scheduler.shutdown();
+  });
+
+  it("a bare manual refresh cannot cross an independently armed same-scope governor cooldown", async () => {
+    const runtime = ManagedRuntime.make(Layer.merge(TestContext.TestContext, ProviderRequestGovernorLive));
+    const governor = await runtime.runPromise(ProviderRequestGovernor);
+    const scheduler = createScheduler({ runtime });
+    let armingProviderStarts = 0;
+    let sameScopeRefreshProviderStarts = 0;
+    let unrelatedProviderStarts = 0;
+
+    try {
+      scheduler.activate({
+        instanceId: "same-scope-refresh-key",
+        keyParts: sameScopeOtherKeyParts,
+        refreshIntervalSeconds: 600,
+        fetch: governedFetch(governor, sourceRequestIdentity(sameScopeOtherKeyParts, "same-scope-refresh"), () => {
+          sameScopeRefreshProviderStarts += 1;
+        }),
+      });
+      await macrotask();
+      expect(sameScopeRefreshProviderStarts).toBe(1);
+
+      const armCooldown = runtime.runPromise(
+        armGovernedCooldown(governor, sourceRequestIdentity(keyParts, "cooldown-source"), 1_800, () => {
+          armingProviderStarts += 1;
+        }),
+      );
+      await macrotask();
+      await runtime.runPromise(TestClock.adjust(Duration.millis(1_000)));
+      await armCooldown;
+      expect(armingProviderStarts).toBe(1);
+
+      sameScopeRefreshProviderStarts = 0;
+      await runtime.runPromise(
+        acquireGovernedAttempt(governor, sourceRequestIdentity(otherKeyParts, "unrelated-source"), () => {
+          unrelatedProviderStarts += 1;
+        }),
+      );
+      expect(unrelatedProviderStarts).toBe(1);
+
+      await scheduler.refresh(sameScopeOtherKey);
+      await macrotask();
+      const blockedRefresh = scheduler.getOutput(sameScopeOtherKey);
+      expect(sameScopeRefreshProviderStarts).toBe(0);
+      expect(blockedRefresh.backoff).toMatchObject({
+        class: "rate-limit",
+        delayMs: 1_800_000,
+        retryAfterApplied: true,
+      });
+
+      await runtime.runPromise(TestClock.adjust(Duration.millis(1_799_999)));
+      await scheduler.refresh(sameScopeOtherKey);
+      await macrotask();
+      expect(sameScopeRefreshProviderStarts).toBe(0);
+
+      await runtime.runPromise(TestClock.adjust(Duration.millis(1)));
+      await macrotask();
+      expect(sameScopeRefreshProviderStarts).toBe(1);
+      const admittedRefresh = scheduler.getOutput(sameScopeOtherKey);
+      expect(admittedRefresh.displayState).toBe("fresh");
+      expect(admittedRefresh.backoff).toBeUndefined();
+      expect(admittedRefresh.nextAllowedRetryAtEpochMs).toBeUndefined();
+    } finally {
+      await scheduler.shutdown();
+      await runtime.dispose();
+    }
   });
 
   it("does not fetch for a manual refresh on an unknown or deactivated key", async () => {

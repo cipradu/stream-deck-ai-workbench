@@ -726,7 +726,7 @@ function healthyWait(entry: KeyEntry): Effect.Effect<void, never, never> {
 /**
  * Computes and records the next back-off delay for a failing poll. The delay comes from
  * the failure class's Effect `Schedule` driver (exponential -> jitter -> cap); a rate-limit failure
- * carrying a sanitized `Retry-After` uses that value instead (capped at the 1h policy maximum),
+ * carrying a sanitized `Retry-After` uses that value instead (capped at the 30-minute policy maximum),
  * overriding the exponential for that attempt. The delay is read WITHOUT sleeping (the driver's own
  * sleep is dropped) and rounded so the reported `delayMs` equals the delay the loop then sleeps.
  * Writes `activeBackoff` to the `Ref` BEFORE the sleep so a read during back-off surfaces it.

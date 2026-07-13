@@ -322,39 +322,60 @@ describe("provider request governor", () => {
     }
   });
 
-  it("caps a safe retry hint without accepting an adapter error or raw retry header", async () => {
-    const runtime = ManagedRuntime.make(Layer.merge(TestContext.TestContext, ProviderRequestGovernorLive));
-    const governor = await runtime.runPromise(ProviderRequestGovernor);
+  it.each([
+    { retryAfterSeconds: 1_799, expectedRetryAfterSeconds: 1_799 },
+    { retryAfterSeconds: 1_800, expectedRetryAfterSeconds: 1_800 },
+    { retryAfterSeconds: 1_801, expectedRetryAfterSeconds: 1_800 },
+  ])(
+    "bounds a safe retry hint at $expectedRetryAfterSeconds seconds for $retryAfterSeconds seconds and admits exactly at expiry",
+    async ({ retryAfterSeconds, expectedRetryAfterSeconds }) => {
+      const runtime = ManagedRuntime.make(Layer.merge(TestContext.TestContext, ProviderRequestGovernorLive));
+      const governor = await runtime.runPromise(ProviderRequestGovernor);
+      let attemptStarts = 0;
 
-    try {
-      await runtime.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const lease = yield* governor.acquireSource(identity(sameScope, "capped-rate-limit-source"));
-            yield* lease.reportRateLimit({ retryAfterSeconds: 3_600_001 });
-            yield* lease.settle({ kind: "failed" });
-          }),
-        ),
-      );
-      const blocked = await runtime.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const lease = yield* governor.acquireSource(identity(sameScope, "capped-blocked-source"));
-            const outcome = yield* Effect.either(lease.acquireAttempt());
-            yield* lease.settle({ kind: "failed" });
-            return outcome;
-          }),
-        ),
-      );
+      try {
+        await runtime.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const lease = yield* governor.acquireSource(identity(sameScope, `bounded-rate-limit-source-${retryAfterSeconds}`));
+              const permit = yield* lease.acquireAttempt();
+              yield* permit.release();
+              yield* lease.reportRateLimit({ retryAfterSeconds });
+              yield* lease.settle({ kind: "failed" });
+            }),
+          ),
+        );
 
-      expect(blocked).toMatchObject({
-        _tag: "Left",
-        left: { failure: { category: "rate-limited" }, retryAfterSeconds: 3_600 },
-      });
-    } finally {
-      await runtime.dispose();
-    }
-  });
+        await runtime.runPromise(TestClock.adjust(Duration.millis(expectedRetryAfterSeconds * 1_000 - 1)));
+        const beforeExpiry = await runtime.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const lease = yield* governor.acquireSource(identity(sameScope, `bounded-blocked-source-${retryAfterSeconds}`));
+              const outcome = yield* Effect.either(lease.acquireAttempt());
+              yield* lease.settle({ kind: "failed" });
+              return outcome;
+            }),
+          ),
+        );
+
+        expect(attemptStarts).toBe(0);
+        expect(beforeExpiry).toMatchObject({
+          _tag: "Left",
+          left: { failure: { category: "rate-limited" }, retryAfterSeconds: 1 },
+        });
+
+        await runtime.runPromise(TestClock.adjust(Duration.millis(1)));
+        await runtime.runPromise(
+          acquireAndSettle(governor, identity(sameScope, `bounded-admitted-source-${retryAfterSeconds}`), () => {
+            attemptStarts += 1;
+          }),
+        );
+        expect(attemptStarts).toBe(1);
+      } finally {
+        await runtime.dispose();
+      }
+    },
+  );
 
   it("does not manufacture cooldown from ordinary failure, defect, interruption, or cancellation", async () => {
     const runtime = ManagedRuntime.make(Layer.merge(TestContext.TestContext, ProviderRequestGovernorLive));

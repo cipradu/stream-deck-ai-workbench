@@ -1712,7 +1712,7 @@ describe("codex Effect-native usage adapter", () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = codexEffectSourceFetch(
       captured,
-      respondJson(200, { rate_limit: { primary_window: { used_percent: 18, reset_at: 1_805_000_000 } } }),
+      respondJson(200, { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 } } }),
       codexOkCredential,
       async () => undefined,
       () => 2_000,
@@ -1744,7 +1744,7 @@ describe("codex Effect-native usage adapter", () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = codexEffectSourceFetch(
       captured,
-      respondJson(200, { rate_limit: { secondary_window: { used_percent: 64, reset_at: 1_805_000_000 } } }),
+      respondJson(200, { rate_limit: { secondary_window: { limit_window_seconds: 604_800, used_percent: 64, reset_at: 1_805_000_000 } } }),
       codexOkCredential,
       async () => undefined,
       () => 3_000,
@@ -1763,11 +1763,279 @@ describe("codex Effect-native usage adapter", () => {
     });
   });
 
+  it("resolves the temporary one-window HTTP shape by explicit seconds without relabeling seven-day as five-hour", async () => {
+    const temporaryResponse = {
+      rate_limit: {
+        primary_window: { limit_window_seconds: 604_800, used_percent: 7, reset_at: 1_806_000_000 },
+        secondary_window: null,
+      },
+    };
+
+    const sevenDay = await codexEffectSourceFetch(
+      [],
+      respondJson(200, temporaryResponse),
+      codexOkCredential,
+      async () => undefined,
+      () => 3_000,
+    )(usageRequest("codex", "seven-day"));
+
+    expect(sevenDay).toMatchObject({
+      ok: true,
+      snapshot: {
+        metricKind: "usage-percent",
+        coverage: { kind: "rolling-window", window: "seven-day" },
+        value: 7,
+        resetsAtEpochMs: 1_806_000_000_000,
+        fetchedAtEpochMs: 3_000,
+      },
+    });
+
+    let sessionReads = 0;
+    const fiveHour = await codexEffectSourceFetch(
+      [],
+      respondJson(200, temporaryResponse),
+      codexOkCredential,
+      async () => {
+        sessionReads += 1;
+        return undefined;
+      },
+      () => 3_000,
+    )(usageRequest("codex", "five-hour"));
+
+    expect(sessionReads).toBe(1);
+    expect(fiveHour).toMatchObject({
+      ok: false,
+      failure: {
+        category: "no-data-yet",
+        displayState: "no-data-yet",
+        provider: { reasonCode: "usage-codex-window-not-returned" },
+      },
+    });
+    expect(fiveHour).not.toHaveProperty("snapshot");
+  });
+
+  it("resolves reversed HTTP slots by explicit seconds", async () => {
+    const reversedResponse = {
+      rate_limit: {
+        primary_window: { limit_window_seconds: 604_800, used_percent: 64, reset_at: 1_806_000_000 },
+        secondary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 },
+      },
+    };
+
+    const fiveHour = await codexEffectSourceFetch(
+      [],
+      respondJson(200, reversedResponse),
+      codexOkCredential,
+      async () => undefined,
+      () => 2_000,
+    )(usageRequest("codex", "five-hour"));
+
+    expect(fiveHour).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window: "five-hour" },
+        value: 18,
+        resetsAtEpochMs: 1_805_000_000_000,
+      },
+    });
+
+    const sevenDay = await codexEffectSourceFetch(
+      [],
+      respondJson(200, reversedResponse),
+      codexOkCredential,
+      async () => undefined,
+      () => 3_000,
+    )(usageRequest("codex", "seven-day"));
+
+    expect(sevenDay).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window: "seven-day" },
+        value: 64,
+        resetsAtEpochMs: 1_806_000_000_000,
+      },
+    });
+  });
+
+  it("treats missing and unsupported HTTP durations as unavailable without positional fallback", async () => {
+    for (const body of [
+      { rate_limit: {} },
+      { rate_limit: { primary_window: { limit_window_seconds: 86_400, used_percent: 99 } } },
+      { rate_limit: { primary_window: { limit_window_seconds: 604_800, used_percent: 64 }, secondary_window: null } },
+    ]) {
+      let sessionReads = 0;
+      const result = await codexEffectSourceFetch(
+        [],
+        respondJson(200, body),
+        codexOkCredential,
+        async () => {
+          sessionReads += 1;
+          return undefined;
+        },
+      )(usageRequest("codex", "five-hour"));
+
+      expect(sessionReads).toBe(1);
+      expect(result).toMatchObject({
+        ok: false,
+        failure: {
+          category: "no-data-yet",
+          displayState: "no-data-yet",
+          provider: { reasonCode: "usage-codex-window-not-returned" },
+        },
+      });
+      expect(result).not.toHaveProperty("snapshot");
+    }
+  });
+
+  it("rejects duplicate requested HTTP durations instead of choosing an arbitrary root candidate", async () => {
+    let sessionReads = 0;
+    const result = await codexEffectSourceFetch(
+      [],
+      respondJson(200, {
+        rate_limit: {
+          primary_window: { limit_window_seconds: 18_000, used_percent: 18 },
+          secondary_window: { limit_window_seconds: 18_000, used_percent: 19 },
+        },
+      }),
+      codexOkCredential,
+      async () => {
+        sessionReads += 1;
+        return undefined;
+      },
+    )(usageRequest("codex", "five-hour"));
+
+    expect(sessionReads).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        category: "no-data-yet",
+        displayState: "no-data-yet",
+        provider: { reasonCode: "usage-codex-window-not-returned" },
+      },
+    });
+    expect(result).not.toHaveProperty("snapshot");
+  });
+
+  it("does not use additional_rate_limits to supply or override the general HTTP window", async () => {
+    const additionalOnly = await codexEffectSourceFetch(
+      [],
+      respondJson(200, {
+        additional_rate_limits: [{ limit_window_seconds: 604_800, used_percent: 88 }],
+      }),
+      codexOkCredential,
+      async () => undefined,
+    )(usageRequest("codex", "seven-day"));
+
+    expect(additionalOnly).toMatchObject({
+      ok: false,
+      failure: {
+        category: "no-data-yet",
+        displayState: "no-data-yet",
+        provider: { reasonCode: "usage-codex-window-not-returned" },
+      },
+    });
+    expect(additionalOnly).not.toHaveProperty("snapshot");
+
+    const rootPlusAdditional = await codexEffectSourceFetch(
+      [],
+      respondJson(200, {
+        rate_limit: {
+          primary_window: { limit_window_seconds: 18_000, used_percent: 18 },
+        },
+        additional_rate_limits: [{ limit_window_seconds: 18_000, used_percent: 99 }],
+      }),
+      codexOkCredential,
+      async () => undefined,
+    )(usageRequest("codex", "five-hour"));
+
+    expect(rootPlusAdditional).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window: "five-hour" },
+        value: 18,
+      },
+    });
+  });
+
+  it("keeps a valid primary window when the unrelated secondary window is null", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = codexEffectSourceFetch(
+      captured,
+      respondJson(200, {
+        rate_limit: {
+          primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 },
+          secondary_window: null,
+        },
+      }),
+      codexOkCredential,
+      async () => undefined,
+      () => 2_000,
+    );
+
+    const result = await runFetch(usageRequest("codex", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        metricKind: "usage-percent",
+        coverage: { kind: "rolling-window", window: "five-hour" },
+        value: 18,
+        resetsAtEpochMs: 1_805_000_000_000,
+      },
+    });
+  });
+
+  it("keeps a valid secondary window when the unrelated primary window is null", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = codexEffectSourceFetch(
+      captured,
+      respondJson(200, {
+        rate_limit: {
+          primary_window: null,
+          secondary_window: { limit_window_seconds: 604_800, used_percent: 64, reset_at: 1_805_000_000 },
+        },
+      }),
+      codexOkCredential,
+      async () => undefined,
+      () => 3_000,
+    );
+
+    const result = await runFetch(usageRequest("codex", "seven-day"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        metricKind: "usage-percent",
+        coverage: { kind: "rolling-window", window: "seven-day" },
+        value: 64,
+        resetsAtEpochMs: 1_805_000_000_000,
+      },
+    });
+  });
+
+  it("keeps malformed present window objects as validation drift", async () => {
+    for (const rateLimit of [
+      { primary_window: {} },
+      { primary_window: { limit_window_seconds: "18000", used_percent: 18 } },
+      { primary_window: { limit_window_seconds: 18_000, used_percent: null } },
+      { secondary_window: { limit_window_seconds: 604_800, used_percent: "64" } },
+    ]) {
+      const runFetch = codexEffectSourceFetch([], respondJson(200, { rate_limit: rateLimit }), codexOkCredential);
+      const result = await runFetch(usageRequest("codex", "five-hour"));
+
+      expect(result).toMatchObject({
+        ok: false,
+        failure: { category: "validation-drift", displayState: "validation-drift", sanitized: true },
+      });
+      expect(result).not.toHaveProperty("snapshot");
+    }
+  });
+
   it("carries BOTH the access token and account id headers via the two Redacted.value unwraps", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = codexEffectSourceFetch(
       captured,
-      respondJson(200, { rate_limit: { primary_window: { used_percent: 18 } } }),
+      respondJson(200, { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18 } } }),
       codexOkCredential,
     );
 
@@ -1787,7 +2055,7 @@ describe("codex Effect-native usage adapter", () => {
       captured,
       respondJsonSequence([
         { status: 401, body: { error: "unauthorized" } },
-        { status: 200, body: { rate_limit: { primary_window: { used_percent: 18, reset_at: 1_805_000_000 } } } },
+        { status: 200, body: { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 } } } },
       ]),
       async () => {
         const accessToken = readTokens[Math.min(reads, readTokens.length - 1)]!;
@@ -1984,12 +2252,65 @@ describe("codex Effect-native usage adapter", () => {
     });
   });
 
+  it("routes a requested null secondary window through the session fallback", async () => {
+    let sessionReads = 0;
+    const runFetch = codexEffectSourceFetch(
+      [],
+      respondJson(200, { rate_limit: { secondary_window: null } }),
+      codexOkCredential,
+      async () => {
+        sessionReads += 1;
+        return { sevenDayPercent: 71, sevenDayResetsAtEpochMs: 1_806_000_000_000, fetchedAtEpochMs: 4_000 };
+      },
+    );
+
+    const result = await runFetch(usageRequest("codex", "seven-day"));
+
+    expect(sessionReads).toBe(1);
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window: "seven-day" },
+        value: 71,
+        fetchedAtEpochMs: 4_000,
+        resetsAtEpochMs: 1_806_000_000_000,
+        source: "local-fallback",
+      },
+    });
+  });
+
+  it("treats a requested null window as no-data when no session snapshot can be adopted", async () => {
+    let sessionReads = 0;
+    const runFetch = codexEffectSourceFetch(
+      [],
+      respondJson(200, { rate_limit: { primary_window: null } }),
+      codexOkCredential,
+      async () => {
+        sessionReads += 1;
+        return undefined;
+      },
+    );
+
+    const result = await runFetch(usageRequest("codex", "five-hour"));
+
+    expect(sessionReads).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        category: "no-data-yet",
+        displayState: "no-data-yet",
+        provider: { reasonCode: "usage-codex-window-not-returned" },
+      },
+    });
+    expect(result).not.toHaveProperty("snapshot");
+  });
+
   it("classifies a rejected local credential read as missing-credentials without issuing any HTTP request (R07c3c defensive branch)", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     let sessionReads = 0;
     const runFetch = codexEffectSourceFetch(
       captured,
-      respondJson(200, { rate_limit: { primary_window: { used_percent: 18 } } }),
+      respondJson(200, { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18 } } }),
       // The auth.json reader REJECTS (the defensive `credentialReadRejected` path; the reader
       // resolves ok/not-ok in practice). No cause crosses onto the sanitized failure.
       async (): Promise<CodexCredentialResult> => {
@@ -2075,7 +2396,7 @@ describe("codex Effect-native usage adapter", () => {
     const runFetch = codexEffectSourceFetch(
       captured,
       // 200 OK but the requested (five-hour/primary) window is absent -> window-not-returned.
-      respondJson(200, { rate_limit: { secondary_window: { used_percent: 30 } } }),
+      respondJson(200, { rate_limit: { secondary_window: { limit_window_seconds: 604_800, used_percent: 30 } } }),
       codexOkCredential,
       async () => {
         sessionReads += 1;
@@ -2106,7 +2427,7 @@ describe("codex Effect-native usage adapter", () => {
     // and, critically, must not consult the session-JSONL fallback for an unoffered window.
     const runFetch = codexEffectSourceFetch(
       captured,
-      respondJson(200, { rate_limit: { primary_window: { used_percent: 18 } } }),
+      respondJson(200, { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18 } } }),
       async (): Promise<CodexCredentialResult> => {
         credentialReads += 1;
         return { ok: true, accessToken: CODEX_ACCESS_TOKEN, accountId: CODEX_ACCOUNT_ID };
@@ -2145,7 +2466,7 @@ describe("codex Effect-native usage adapter", () => {
       captured,
       // The SAME /backend-api/wham/usage response also carries credits.balance as a numeric STRING.
       respondJson(200, {
-        rate_limit: { primary_window: { used_percent: 18, reset_at: 1_805_000_000 } },
+        rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 } },
         credits: { balance: "25000" },
       }),
       codexOkCredential,
@@ -2192,9 +2513,34 @@ describe("codex Effect-native usage adapter", () => {
     expect(result).toMatchObject({ ok: true, snapshot: { metricKind: "usage-credits", value: 108_300 } });
   });
 
+  it("keeps credits decoding intact when unrelated percentage windows are null", async () => {
+    const runFetch = codexEffectSourceFetch(
+      [],
+      respondJson(200, {
+        rate_limit: { primary_window: null, secondary_window: null },
+        credits: { balance: "25000" },
+      }),
+      codexOkCredential,
+      async () => undefined,
+      () => 2_000,
+    );
+
+    const result = await runFetch(usageRequest("codex", "credits"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        metricKind: "usage-credits",
+        coverage: { kind: "evergreen" },
+        value: 25_000,
+        fetchedAtEpochMs: 2_000,
+      },
+    });
+  });
+
   it("fails closed to no-data (not validation-drift) on absent/null/malformed credits, never a fake zero", async () => {
     const malformed = [
-      { rate_limit: { primary_window: { used_percent: 18 } } }, // credits absent
+      { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18 } } }, // credits absent
       { credits: null },
       { credits: {} }, // balance missing
       { credits: { balance: null } },
@@ -2222,7 +2568,7 @@ describe("codex Effect-native usage adapter", () => {
     for (const credits of ["unlimited", null, {}, { balance: "unlimited" }, { balance: null }, 42]) {
       const runFetch = codexEffectSourceFetch(
         [],
-        respondJson(200, { rate_limit: { primary_window: { used_percent: 18, reset_at: 1_805_000_000 } }, credits }),
+        respondJson(200, { rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 } }, credits }),
         codexOkCredential,
         async () => undefined,
         () => 2_000,
@@ -2264,7 +2610,7 @@ describe("codex Effect-native usage adapter", () => {
     const runFetch = codexEffectSourceFetch(
       [],
       respondJson(200, {
-        rate_limit: { primary_window: { used_percent: 18, reset_at: 1_805_000_000 } },
+        rate_limit: { primary_window: { limit_window_seconds: 18_000, used_percent: 18, reset_at: 1_805_000_000 } },
         credits: { balance: "25000" },
       }),
       codexOkCredential,

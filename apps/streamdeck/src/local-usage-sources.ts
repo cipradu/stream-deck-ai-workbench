@@ -14,10 +14,22 @@ const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const DEFAULT_CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
 const CODEX_SESSION_TAIL_BYTES = 128 * 1024;
+const CODEX_USAGE_WINDOW_DURATIONS = {
+  "five-hour": { seconds: 18_000, minutes: 300 },
+  "seven-day": { seconds: 604_800, minutes: 10_080 },
+} as const;
+
+type CodexSessionWindowId = keyof typeof CODEX_USAGE_WINDOW_DURATIONS;
 
 interface SessionFileInfo {
   readonly path: string;
   readonly mtimeMs: number;
+}
+
+interface ParsedCodexSessionWindow {
+  readonly windowMinutes: number;
+  readonly usedPercent: number;
+  readonly resetsAtEpochMs?: number;
 }
 
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
@@ -220,21 +232,18 @@ export function parseLastRateLimitsLine(content: string, fetchedAtEpochMs: numbe
       continue;
     }
 
-    const fiveHourPercent = sessionWindowPercent(rateLimits.primary);
-    const sevenDayPercent = sessionWindowPercent(rateLimits.secondary);
-    if (fiveHourPercent === undefined && sevenDayPercent === undefined) {
+    const fiveHourWindow = sessionWindowForRateLimits(rateLimits, "five-hour");
+    const sevenDayWindow = sessionWindowForRateLimits(rateLimits, "seven-day");
+    if (fiveHourWindow === undefined && sevenDayWindow === undefined) {
       continue;
     }
 
-    const fiveHourResetsAtEpochMs = sessionWindowResetsAtEpochMs(rateLimits.primary);
-    const sevenDayResetsAtEpochMs = sessionWindowResetsAtEpochMs(rateLimits.secondary);
-
     return {
       fetchedAtEpochMs,
-      ...(fiveHourPercent === undefined ? {} : { fiveHourPercent }),
-      ...(sevenDayPercent === undefined ? {} : { sevenDayPercent }),
-      ...(fiveHourResetsAtEpochMs === undefined ? {} : { fiveHourResetsAtEpochMs }),
-      ...(sevenDayResetsAtEpochMs === undefined ? {} : { sevenDayResetsAtEpochMs }),
+      ...(fiveHourWindow === undefined ? {} : { fiveHourPercent: fiveHourWindow.usedPercent }),
+      ...(sevenDayWindow === undefined ? {} : { sevenDayPercent: sevenDayWindow.usedPercent }),
+      ...(fiveHourWindow?.resetsAtEpochMs === undefined ? {} : { fiveHourResetsAtEpochMs: fiveHourWindow.resetsAtEpochMs }),
+      ...(sevenDayWindow?.resetsAtEpochMs === undefined ? {} : { sevenDayResetsAtEpochMs: sevenDayWindow.resetsAtEpochMs }),
     };
   }
 
@@ -261,13 +270,45 @@ function findRateLimits(value: unknown): { readonly primary?: unknown; readonly 
   return undefined;
 }
 
-function sessionWindowPercent(value: unknown): number | undefined {
+function sessionWindowForRateLimits(
+  rateLimits: { readonly primary?: unknown; readonly secondary?: unknown },
+  window: CodexSessionWindowId,
+): ParsedCodexSessionWindow | undefined {
+  const requestedMinutes = CODEX_USAGE_WINDOW_DURATIONS[window].minutes;
+  const matches = [rateLimits.primary, rateLimits.secondary].flatMap((candidate) => {
+    const parsed = parseSessionWindow(candidate);
+    return parsed !== undefined && parsed.windowMinutes === requestedMinutes ? [parsed] : [];
+  });
+
+  if (matches.length !== 1) {
+    return undefined;
+  }
+
+  return matches[0];
+}
+
+function parseSessionWindow(value: unknown): ParsedCodexSessionWindow | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
 
+  const windowMinutes = value.window_minutes;
   const usedPercent = value.used_percent;
-  return typeof usedPercent === "number" && Number.isFinite(usedPercent) ? usedPercent : undefined;
+  if (
+    typeof windowMinutes !== "number" ||
+    !Number.isFinite(windowMinutes) ||
+    typeof usedPercent !== "number" ||
+    !Number.isFinite(usedPercent)
+  ) {
+    return undefined;
+  }
+
+  const resetsAtEpochMs = sessionWindowResetsAtEpochMs(value);
+  return {
+    windowMinutes,
+    usedPercent,
+    ...(resetsAtEpochMs === undefined ? {} : { resetsAtEpochMs }),
+  };
 }
 
 /** Session-file window reset: `resets_at` epoch SECONDS -> ms (old fallback shape); zero/absent -> none. */

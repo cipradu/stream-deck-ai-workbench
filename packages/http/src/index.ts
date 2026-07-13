@@ -25,7 +25,7 @@ import {
 export const packageName = "@ai-workbench/http" as const;
 
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
-export const MAX_RETRY_AFTER_SECONDS = 60 * 60;
+export const MAX_RETRY_AFTER_SECONDS = 30 * 60;
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -358,7 +358,7 @@ function normalizeTimeout(value: number | undefined): number {
  * Parses an HTTP `Retry-After` header into a bounded delay in seconds. Accepts the
  * delta-seconds and HTTP-date forms; `nowMs` is supplied by the Effect `Clock` at
  * the call site so this stays a pure, deterministically testable function. Values
- * are clamped to `MAX_RETRY_AFTER_SECONDS` (1h). `Date.parse` here parses a header
+ * are clamped to `MAX_RETRY_AFTER_SECONDS` (30 minutes). `Date.parse` here parses a header
  * string only — it is not a wall-clock read.
  */
 export function parseRetryAfter(value: string | null, nowMs: number): number | undefined {
