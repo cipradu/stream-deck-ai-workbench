@@ -49,7 +49,7 @@ export const zaiCodingPlanUsageProviderModule = {
   // Usage mirror of the Balance recipe — an `Effect` program that consumes the `@effect/platform`
   // `HttpClient`, resolves the `Redacted` credential from global settings, builds the single
   // quota request with the raw key at the `authorization` header (the SINGLE `Redacted.value`
-  // unwrap), decodes at the source via `requestJsonSchema` (schemaBodyJson, ONE attempt, NO
+  // unwrap), decodes at the source via `requestJsonSchema` (central one-read JSON decoder, ONE attempt, NO
   // retry), and yields the plain normalized usage snapshot. The window/success/window-absence
   // semantics are preserved verbatim from the old working adapter. The Effect-native scheduler
   // consumes this adapter Effect directly (no Promise bridge on the live path); the scheduler

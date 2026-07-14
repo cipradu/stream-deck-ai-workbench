@@ -27,6 +27,7 @@ import { listProviderOptionsForFamily } from "../src/property-inspector.js";
 import { prepareLogoSvg } from "../src/logo-loader.js";
 import { renderDisplayInput } from "../src/renderer.js";
 import { createAppManagedRuntime, createRuntimeServices } from "../src/runtime.js";
+import { createSchedulerFetchForActionSettings, withFetchPathLogging } from "../src/scheduler-fetch.js";
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
 import { parseClaudeCodeKeychainPayload, parseCodexAuthJsonPayload, parseLastRateLimitsLine } from "../src/local-usage-sources.js";
 import {
@@ -335,6 +336,241 @@ function rateLimitedFailure() {
     },
   });
 }
+
+describe("scheduler fetch-path logging", () => {
+  it("emits one existing failed event with only catalog-normalized Claude response diagnostic labels", async () => {
+    const parsed = parseActionSettings(usageSettings);
+    if (!parsed.ok) {
+      throw new Error("Expected valid Claude Code usage test settings");
+    }
+
+    const logEvents: SanitizedLogEvent[] = [];
+    const logSink: StreamDeckLogSink = {
+      write: (event) => {
+        logEvents.push(event);
+      },
+    };
+    const loggedFetch = withFetchPathLogging(
+      parsed.value,
+      {
+        logSink,
+        now: () => 100,
+        readGlobalSettings: async () => ({}),
+        sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
+      },
+      () =>
+        Effect.fail({
+          failure: createSanitizedFailure({
+            category: "validation-drift",
+            diagnostics: {
+              reasonCode: "claude-code-usage-five-hour-utilization-invalid",
+              responseDiagnostic: {
+                code: "claude-code-usage-five-hour-utilization-invalid",
+                receivedType: "string",
+              },
+            },
+          }),
+        }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        loggedFetch({
+          key: parsed.value.schedulerKey,
+          keyParts: parsed.value.schedulerKeyParts,
+          schedulerKey: parsed.value.schedulerKey,
+          signal: new AbortController().signal,
+          startedAtEpochMs: 100,
+          trigger: "healthy-poll",
+        }),
+      ),
+    );
+
+    expect(outcome).toMatchObject({
+      _tag: "Left",
+      left: {
+        failure: {
+          category: "validation-drift",
+          diagnostics: {
+            reasonCode: "claude-code-usage-five-hour-utilization-invalid",
+            responseDiagnostic: {
+              code: "claude-code-usage-five-hour-utilization-invalid",
+              expectedType: "number-or-null",
+              receivedType: "string",
+            },
+          },
+          retryClass: "rate-limit-backoff",
+        },
+      },
+    });
+
+    expect(logEvents.map((event) => event.eventName)).toEqual([
+      "streamdeck-provider-fetch-started",
+      "streamdeck-provider-fetch-failed",
+    ]);
+    const failureEvents = logEvents.filter((event) => event.eventName === "streamdeck-provider-fetch-failed");
+    expect(failureEvents).toEqual([
+      {
+        context: {
+          actionFamilyId: "usage",
+          elapsedMs: 0,
+          expectedResponseType: "number-or-null",
+          providerId: "claude-code",
+          reasonCode: "claude-code-usage-five-hour-utilization-invalid",
+          receivedResponseType: "string",
+          retryClass: "rate-limit-backoff",
+        },
+        eventName: "streamdeck-provider-fetch-failed",
+        level: "warn",
+        message: "Provider response validation failed.",
+        sanitized: true,
+      },
+    ]);
+  });
+
+  it("keeps successful Claude fetch logging on the existing context without response type labels", async () => {
+    const parsed = parseActionSettings(usageSettings);
+    if (!parsed.ok) {
+      throw new Error("Expected valid Claude Code usage test settings");
+    }
+
+    const logEvents: SanitizedLogEvent[] = [];
+    const loggedFetch = withFetchPathLogging(
+      parsed.value,
+      {
+        logSink: {
+          write: (event) => {
+            logEvents.push(event);
+          },
+        },
+        now: () => 100,
+        readGlobalSettings: async () => ({}),
+        sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
+      },
+      () =>
+        Effect.succeed<NormalizedSnapshot>({
+          coverage: { kind: "rolling-window", window: "five-hour" },
+          familyId: "usage",
+          fetchedAtEpochMs: 100,
+          metricDirection: "upper-bound",
+          metricKind: "usage-percent",
+          providerId: "claude-code",
+          unit: "percent",
+          value: 42,
+        }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        loggedFetch({
+          key: parsed.value.schedulerKey,
+          keyParts: parsed.value.schedulerKeyParts,
+          schedulerKey: parsed.value.schedulerKey,
+          signal: new AbortController().signal,
+          startedAtEpochMs: 100,
+          trigger: "healthy-poll",
+        }),
+      ),
+    );
+
+    expect(outcome).toMatchObject({
+      _tag: "Right",
+      right: {
+        coverage: { kind: "rolling-window", window: "five-hour" },
+        providerId: "claude-code",
+        value: 42,
+      },
+    });
+    expect(logEvents.map((event) => event.eventName)).toEqual([
+      "streamdeck-provider-fetch-started",
+      "streamdeck-provider-fetch-succeeded",
+    ]);
+    const successEvents = logEvents.filter((event) => event.eventName === "streamdeck-provider-fetch-succeeded");
+    expect(successEvents).toEqual([
+      {
+        context: {
+          actionFamilyId: "usage",
+          elapsedMs: 0,
+          providerId: "claude-code",
+          reasonCode: "fetch-succeeded",
+        },
+        eventName: "streamdeck-provider-fetch-succeeded",
+        level: "info",
+        message: "Provider fetch succeeded.",
+        sanitized: true,
+      },
+    ]);
+    expect(successEvents[0]?.context).not.toHaveProperty("expectedResponseType");
+    expect(successEvents[0]?.context).not.toHaveProperty("receivedResponseType");
+  });
+
+  it("keeps non-response failures on the existing context without response type labels", async () => {
+    const parsed = parseActionSettings(usageSettings);
+    if (!parsed.ok) {
+      throw new Error("Expected valid Claude Code usage test settings");
+    }
+
+    const logEvents: SanitizedLogEvent[] = [];
+    const runFetch = createSchedulerFetchForActionSettings(parsed.value, {
+      localSources: {},
+      logSink: {
+        write: (event) => {
+          logEvents.push(event);
+        },
+      },
+      now: () => 100,
+      readGlobalSettings: async () => ({}),
+      sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
+    });
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        runFetch({
+          key: parsed.value.schedulerKey,
+          keyParts: parsed.value.schedulerKeyParts,
+          schedulerKey: parsed.value.schedulerKey,
+          signal: new AbortController().signal,
+          startedAtEpochMs: 100,
+          trigger: "healthy-poll",
+        }),
+      ),
+    );
+
+    expect(outcome).toMatchObject({
+      _tag: "Left",
+      left: {
+        failure: {
+          category: "no-data-yet",
+          diagnostics: { reasonCode: "usage-claude-source-reader-missing" },
+          retryClass: "healthy-poll",
+        },
+      },
+    });
+
+    expect(logEvents.map((event) => event.eventName)).toEqual([
+      "streamdeck-provider-fetch-started",
+      "streamdeck-provider-fetch-failed",
+    ]);
+    const failureEvents = logEvents.filter((event) => event.eventName === "streamdeck-provider-fetch-failed");
+    expect(failureEvents).toEqual([
+      {
+        context: {
+          actionFamilyId: "usage",
+          elapsedMs: 0,
+          providerId: "claude-code",
+          reasonCode: "usage-claude-source-reader-missing",
+          retryClass: "healthy-poll",
+        },
+        eventName: "streamdeck-provider-fetch-failed",
+        level: "warn",
+        message: "No provider data is available yet.",
+        sanitized: true,
+      },
+    ]);
+    expect(failureEvents[0]?.context).not.toHaveProperty("expectedResponseType");
+    expect(failureEvents[0]?.context).not.toHaveProperty("receivedResponseType");
+  });
+});
 
 describe("provider logo assets", () => {
   it("every deployed provider logo, including minimax, prepares to a renderable lockup", async () => {

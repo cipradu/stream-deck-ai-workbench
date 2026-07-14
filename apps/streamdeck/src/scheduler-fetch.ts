@@ -69,7 +69,7 @@ const USAGE_PROVIDER_BASE_URLS = {
  * source-gated adapter `Effect` with the `HttpClient` layer provided here at the shell boundary,
  * wrapped with sanitized fetch-path logging. This removes the temporary `runPromiseExit` bridge —
  * the adapter Effect flows straight into the scheduler fiber (scheduler fiber -> adapter Effect ->
- * HttpClient -> schemaBodyJson).
+ * HttpClient -> central one-read JSON decoder).
  */
 export function createSchedulerFetchForActionSettings(
   settings: NormalizedActionSettingsView,
@@ -79,7 +79,7 @@ export function createSchedulerFetchForActionSettings(
 }
 
 /** Sanitized provider-fetch path logs: started, succeeded, failed (never payloads or secrets). */
-function withFetchPathLogging(
+export function withFetchPathLogging(
   settings: NormalizedActionSettingsView,
   options: CreateSchedulerFetchOptions,
   runFetch: SchedulerEffectFetch,
@@ -128,6 +128,12 @@ function withFetchPathLogging(
           reasonCode: failure.diagnostics.reasonCode,
           retryClass: failure.retryClass,
           ...(failure.diagnostics.httpStatusClass === undefined ? {} : { httpStatusClass: failure.diagnostics.httpStatusClass }),
+          ...(failure.diagnostics.responseDiagnostic?.expectedType === undefined
+            ? {}
+            : { expectedResponseType: failure.diagnostics.responseDiagnostic.expectedType }),
+          ...(failure.diagnostics.responseDiagnostic?.receivedType === undefined
+            ? {}
+            : { receivedResponseType: failure.diagnostics.responseDiagnostic.receivedType }),
           elapsedMs,
         },
         eventName: "streamdeck-provider-fetch-failed",

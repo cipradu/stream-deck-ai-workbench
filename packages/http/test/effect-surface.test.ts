@@ -7,13 +7,18 @@ import {
 } from "@effect/platform";
 import { describe, expect, it } from "vitest";
 
-import { taggedFailureToSanitizedFailure, type SanitizedTaggedError } from "@ai-workbench/errors";
+import {
+  taggedFailureToSanitizedFailure,
+  type ResponseDiagnosticCode,
+  type SanitizedTaggedError,
+} from "@ai-workbench/errors";
 
 import {
   buildHttpRequest,
   decodeJsonBody,
   executeRequest,
   fetchHttpClientLayer,
+  type JsonResponseClassifier,
   MAX_RETRY_AFTER_SECONDS,
   requestJsonSchema,
   requestTextBody,
@@ -32,6 +37,12 @@ const RAW_NEEDLES = {
 const THIRTY_MINUTE_RETRY_AFTER_SECONDS = 1_800;
 
 const RemainingSchema = Schema.Struct({ remaining: Schema.Number });
+const NestedUsageSchema = Schema.Struct({
+  five_hour: Schema.Struct({
+    utilization: Schema.Number,
+    resets_at: Schema.String,
+  }),
+});
 
 type ExecuteFake = (
   request: HttpClientRequest.HttpClientRequest,
@@ -89,7 +100,7 @@ function neverResponds(): ExecuteFake {
 /**
  * A fake whose response HEADERS arrive immediately (execute succeeds with a 2xx) but
  * whose BODY read hangs forever: the web `ReadableStream` never enqueues and never
- * closes, so the platform body read behind `schemaBodyJson` (`source.text()`) never
+ * closes, so the central one-read JSON decoder's `response.text` read never
  * resolves. `onBodyRead` fires when that body read actually begins (the stream is first
  * pulled), letting a test act — advance `TestClock`, or abort — ONLY after the pipeline
  * has ENTERED the body-read phase. That phase is exactly what the fix brings
@@ -113,6 +124,25 @@ function stalledBodyResponse(onBodyRead: () => void): ExecuteFake {
         ),
       ),
     );
+}
+
+function unreadableResponse(request: HttpClientRequest.HttpClientRequest): HttpClientResponse.HttpClientResponse {
+  const response = HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+  return {
+    ...response,
+    text: Effect.fail(
+      new HttpClientError.ResponseError({
+        request,
+        response,
+        reason: "Decode",
+        cause: new Error("body-read-sentinel"),
+      }),
+    ),
+  } as HttpClientResponse.HttpClientResponse;
+}
+
+function responseDiagnosticCode(error: SanitizedTaggedError): string | undefined {
+  return error._tag === "ValidationDrift" ? error.responseDiagnostic?.code : undefined;
 }
 
 async function runSurface<A>(
@@ -148,9 +178,19 @@ describe("@ai-workbench/http Effect-native surface", () => {
     expect(request.url).toBe(RAW_NEEDLES.requestUrl);
   });
 
-  it("decodes a valid 2xx body to the typed schema value via schemaBodyJson", async () => {
-    const exit = await runSurface(requestJsonSchema(baseRequest, RemainingSchema), respond(200, '{"remaining":12}'));
+  it("decodes a valid 2xx body to the typed schema value without consulting the classifier", async () => {
+    let classifierCalls = 0;
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, RemainingSchema, {
+        responseClassifier: () => {
+          classifierCalls += 1;
+          return "claude-code-usage-root-not-object";
+        },
+      }),
+      respond(200, '{"remaining":12}'),
+    );
     expect(exit).toStrictEqual(Exit.succeed({ remaining: 12 }));
+    expect(classifierCalls).toBe(0);
   });
 
   it("executeRequest yields the raw 2xx response for adapter-side composition", async () => {
@@ -161,39 +201,164 @@ describe("@ai-workbench/http Effect-native surface", () => {
     }
   });
 
-  it("maps a malformed (non-JSON) body to ValidationDrift without leaking the raw body", async () => {
+  it("maps an unreadable body to the fixed safe diagnostic without serializing its failure", async () => {
+    const request = buildHttpRequest(baseRequest);
+    const exit = await Effect.runPromiseExit(decodeJsonBody(unreadableResponse(request), RemainingSchema));
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-body-unreadable");
+    const serialized = JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged));
+    expect(serialized).not.toContain("body-read-sentinel");
+  });
+
+  it("maps a whitespace-only body to the fixed empty-body diagnostic", async () => {
+    const exit = await runSurface(requestJsonSchema(baseRequest, RemainingSchema), respond(200, " \n\t "));
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-body-empty");
+  });
+
+  it("maps a malformed body to the fixed non-JSON diagnostic without leaking the raw body", async () => {
     const exit = await runSurface(
       requestJsonSchema(baseRequest, RemainingSchema),
       respond(200, `{"remaining": "${RAW_NEEDLES.responseBody}"`),
     );
     const tagged = taggedFailure(exit);
     expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-body-not-json");
     expect(taggedFailureToSanitizedFailure(tagged).category).toBe("validation-drift");
     const serialized = JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged));
     expect(serialized).not.toContain(RAW_NEEDLES.responseBody);
   });
 
-  it("maps a schema-mismatch (valid JSON, wrong shape) to ValidationDrift", async () => {
+  it("maps a schema-mismatch without a classifier to the generic safe diagnostic", async () => {
     const exit = await runSurface(
       requestJsonSchema(baseRequest, RemainingSchema),
       respond(200, `{"remaining":"${RAW_NEEDLES.responseBody}"}`),
     );
     const tagged = taggedFailure(exit);
     expect(tagged._tag).toBe("ValidationDrift");
-    // The ParseError carries the raw value; it must be discarded, not surfaced.
+    expect(responseDiagnosticCode(tagged)).toBe("response-json-schema-mismatch");
+    // The schema error carries the raw value; it must be discarded, not surfaced.
     const serialized = JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged));
     expect(serialized).not.toContain(RAW_NEEDLES.responseBody);
   });
 
-  it("decodeJsonBody maps a body-read/parse failure to ValidationDrift in isolation", async () => {
-    const request = buildHttpRequest(baseRequest);
-    const response = HttpClientResponse.fromWeb(request, new Response("not json at all", { status: 200 }));
-    const exit = await Effect.runPromiseExit(decodeJsonBody(response, RemainingSchema));
-    expect(Exit.isFailure(exit)).toBe(true);
-    if (Exit.isFailure(exit)) {
-      const failure = Option.getOrUndefined(Cause.failureOption(exit.cause));
-      expect(failure?._tag).toBe("ValidationDrift");
+  it("uses a catalog-valid classifier result only after the schema rejects", async () => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, RemainingSchema, {
+        responseClassifier: () => "claude-code-usage-root-not-object",
+      }),
+      respond(200, "[]"),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("claude-code-usage-root-not-object");
+    if (tagged._tag === "ValidationDrift") {
+      expect(tagged.responseDiagnostic).toMatchObject({ expectedType: "object", receivedType: "array" });
     }
+  });
+
+  it("derives a nested window diagnostic received type from the catalog selector", async () => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, NestedUsageSchema, {
+        responseClassifier: () => "claude-code-usage-five-hour-not-object",
+      }),
+      respond(200, '{"five_hour":"not-an-object"}'),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("claude-code-usage-five-hour-not-object");
+    if (tagged._tag === "ValidationDrift") {
+      expect(tagged.responseDiagnostic).toMatchObject({ expectedType: "object", receivedType: "string" });
+    }
+  });
+
+  it("derives a nested strict-field diagnostic received type from the catalog selector", async () => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, NestedUsageSchema, {
+        responseClassifier: () => "claude-code-usage-five-hour-utilization-invalid",
+      }),
+      respond(200, '{"five_hour":{"utilization":"not-a-number","resets_at":"valid"}}'),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("claude-code-usage-five-hour-utilization-invalid");
+    if (tagged._tag === "ValidationDrift") {
+      expect(tagged.responseDiagnostic).toMatchObject({ expectedType: "number-or-null", receivedType: "string" });
+    }
+  });
+
+  it("keeps a registered body-phase classifier result on the generic schema-mismatch fallback", async () => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, RemainingSchema, {
+        responseClassifier: () => "response-body-empty",
+      }),
+      respond(200, '{"remaining":"not-a-number"}'),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-json-schema-mismatch");
+    if (tagged._tag === "ValidationDrift") {
+      expect(tagged.responseDiagnostic).toEqual({ code: "response-json-schema-mismatch" });
+    }
+  });
+
+  it.each([
+    ["missing static segment", '{"five_hour":{}}'],
+    ["non-object static segment", '{"five_hour":null}'],
+  ])("falls back to the generic mismatch for a %s", async (_kind, body) => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, NestedUsageSchema, {
+        responseClassifier: () => "claude-code-usage-five-hour-utilization-invalid",
+      }),
+      respond(200, body),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-json-schema-mismatch");
+  });
+
+  const classifierFallbackCases: readonly (readonly [string, JsonResponseClassifier, string])[] = [
+    [
+      "throwing",
+      () => {
+        throw new Error("classifier-throw-sentinel");
+      },
+      "classifier-throw-sentinel",
+    ],
+    ["unregistered", () => "unregistered-response-diagnostic" as unknown as ResponseDiagnosticCode, "unregistered-response-diagnostic"],
+    ["catalog-incompatible", () => "claude-code-usage-root-not-object", ""],
+  ];
+
+  it.each(classifierFallbackCases)("contains a %s classifier result and falls back to the generic safe mismatch", async (_kind, responseClassifier, sentinel) => {
+    const exit = await runSurface(
+      requestJsonSchema(baseRequest, RemainingSchema, { responseClassifier }),
+      respond(200, '{"remaining":"not-a-number"}'),
+    );
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(responseDiagnosticCode(tagged)).toBe("response-json-schema-mismatch");
+    const serialized = JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged));
+    if (sentinel.length > 0) {
+      expect(serialized).not.toContain(sentinel);
+    }
+  });
+
+  it("reads a JSON response body exactly once", async () => {
+    const request = buildHttpRequest(baseRequest);
+    const baseResponse = HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+    let bodyReads = 0;
+    const response = {
+      ...baseResponse,
+      text: Effect.sync(() => {
+        bodyReads += 1;
+        return '{"remaining":12}';
+      }),
+    } as HttpClientResponse.HttpClientResponse;
+    const exit = await Effect.runPromiseExit(decodeJsonBody(response, RemainingSchema));
+    expect(exit).toStrictEqual(Exit.succeed({ remaining: 12 }));
+    expect(bodyReads).toBe(1);
   });
 
   it.each([

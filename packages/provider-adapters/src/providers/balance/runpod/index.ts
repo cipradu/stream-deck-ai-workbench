@@ -30,7 +30,7 @@ export const runpodBalanceProviderModule = {
   },
   // Effect-native source fetch: a two-call
   // `Effect` program (billing pods + endpoints) that consumes the `@effect/platform`
-  // `HttpClient` and decodes each call at the source via `requestJsonSchema` (schemaBodyJson,
+  // `HttpClient` and decodes each call at the source via `requestJsonSchema` (central one-read JSON decoder,
   // ONE attempt per call, NO retry). Each call's raw JSON is combined and the shared shape is
   // validated by `RunpodBillingResponseSchema` inside `normalize` (as the Promise path did — the
   // individual calls carry no vendor schema). A failed pods call short-circuits before endpoints.

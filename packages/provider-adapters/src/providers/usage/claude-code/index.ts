@@ -3,7 +3,7 @@ import { Clock, Effect, Option, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
 import { MissingCredentials } from "@ai-workbench/errors";
-import { DEFAULT_HTTP_TIMEOUT_MS } from "@ai-workbench/http";
+import { DEFAULT_HTTP_TIMEOUT_MS, type JsonResponseClassifier } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 import type { GovernorBlocked, SchedulerFetchRequest } from "@ai-workbench/scheduler";
 
@@ -40,13 +40,13 @@ const ClaudeCodeUsageResponseSchema = Schema.Struct({
   five_hour: Schema.optional(
     Schema.Struct({
       utilization: Schema.optional(Schema.NullOr(Schema.Number)),
-      resets_at: Schema.optional(Schema.String),
+      resets_at: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   ),
   seven_day: Schema.optional(
     Schema.Struct({
       utilization: Schema.optional(Schema.NullOr(Schema.Number)),
-      resets_at: Schema.optional(Schema.String),
+      resets_at: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   ),
   // Fable source: the OAuth usage response's `limits[]`. Deliberately
@@ -66,6 +66,40 @@ const ClaudeCodeUsageResponseSchema = Schema.Struct({
   // to the credit-spend path's "not returned" no-data and never touches the 5h/7d/fable path.
   spend: Schema.optional(Schema.Unknown),
 });
+
+const classifyClaudeCodeUsageResponse: JsonResponseClassifier = (response) => {
+  if (!isJsonObject(response)) {
+    return "claude-code-usage-root-not-object";
+  }
+
+  const fiveHour = response.five_hour;
+  if (hasOwn(response, "five_hour") && !isJsonObject(fiveHour)) {
+    return "claude-code-usage-five-hour-not-object";
+  }
+  if (isJsonObject(fiveHour)) {
+    if (hasOwn(fiveHour, "utilization") && fiveHour.utilization !== null && typeof fiveHour.utilization !== "number") {
+      return "claude-code-usage-five-hour-utilization-invalid";
+    }
+    if (hasOwn(fiveHour, "resets_at") && fiveHour.resets_at !== null && typeof fiveHour.resets_at !== "string") {
+      return "claude-code-usage-five-hour-resets-at-invalid";
+    }
+  }
+
+  const sevenDay = response.seven_day;
+  if (hasOwn(response, "seven_day") && !isJsonObject(sevenDay)) {
+    return "claude-code-usage-seven-day-not-object";
+  }
+  if (isJsonObject(sevenDay)) {
+    if (hasOwn(sevenDay, "utilization") && sevenDay.utilization !== null && typeof sevenDay.utilization !== "number") {
+      return "claude-code-usage-seven-day-utilization-invalid";
+    }
+    if (hasOwn(sevenDay, "resets_at") && sevenDay.resets_at !== null && typeof sevenDay.resets_at !== "string") {
+      return "claude-code-usage-seven-day-resets-at-invalid";
+    }
+  }
+
+  return undefined;
+};
 
 export type ClaudeCodeUsageResponse = Schema.Schema.Type<typeof ClaudeCodeUsageResponseSchema>;
 
@@ -234,7 +268,7 @@ export function createClaudeCodeUsageSourceOperation(
         governedRequestJsonSchema(
           { url: usageUrl, headers: claudeCodeHeaders(token), signal },
           ClaudeCodeUsageResponseSchema,
-          { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
+          { defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS, responseClassifier: classifyClaudeCodeUsageResponse },
         );
 
       // The 401 refresh is provider-auth logic, not scheduler backoff. Each HTTP call still
@@ -363,6 +397,14 @@ function credentialReadRejected(): MissingCredentials {
   });
 }
 
+function isJsonObject(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function hasOwn(input: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(input, key);
+}
+
 function usageWindowForResponse(
   response: ClaudeCodeUsageResponse,
   window: UsageWindowId,
@@ -376,7 +418,8 @@ function usageWindowForResponse(
     return undefined;
   }
 
-  const parsedResetsAt = rawWindow?.resets_at === undefined ? Number.NaN : Date.parse(rawWindow.resets_at);
+  const resetsAt = rawWindow?.resets_at;
+  const parsedResetsAt = typeof resetsAt === "string" ? Date.parse(resetsAt) : Number.NaN;
   return {
     value: utilization,
     ...(Number.isFinite(parsedResetsAt) && parsedResetsAt > 0 ? { resetsAtEpochMs: parsedResetsAt } : {}),

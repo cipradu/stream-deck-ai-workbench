@@ -534,7 +534,7 @@ function anthropicEffectSourceFetch(
 }
 
 describe("anthropic-api Effect-native adapter", () => {
-  it("fetches and decodes the vendor body at the source via schemaBodyJson into a normalized snapshot", async () => {
+  it("fetches and decodes the vendor body at the source via the central one-read decoder into a normalized snapshot", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostReportBody()));
 
@@ -1068,6 +1068,338 @@ function claudeCodeEffectSourceFetch(
 }
 
 describe("claude-code Effect-native usage adapter", () => {
+  const structuralMismatchCases = [
+    {
+      name: "a non-object response root",
+      body: [],
+      diagnostic: {
+        code: "claude-code-usage-root-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      },
+    },
+    {
+      name: "a non-object five-hour window",
+      body: { five_hour: [] },
+      diagnostic: {
+        code: "claude-code-usage-five-hour-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      },
+    },
+    {
+      name: "a non-object seven-day window",
+      body: { seven_day: false },
+      diagnostic: {
+        code: "claude-code-usage-seven-day-not-object",
+        expectedType: "object",
+        receivedType: "boolean",
+      },
+    },
+    {
+      name: "an invalid five-hour utilization",
+      body: { five_hour: { utilization: [] } },
+      diagnostic: {
+        code: "claude-code-usage-five-hour-utilization-invalid",
+        expectedType: "number-or-null",
+        receivedType: "array",
+      },
+    },
+    {
+      name: "an invalid seven-day utilization",
+      body: { seven_day: { utilization: false } },
+      diagnostic: {
+        code: "claude-code-usage-seven-day-utilization-invalid",
+        expectedType: "number-or-null",
+        receivedType: "boolean",
+      },
+    },
+  ] as const;
+
+  const nullableRollingWindowResetCases = [
+    {
+      name: "a five-hour reset",
+      body: { five_hour: { utilization: 42, resets_at: null } },
+      window: "five-hour",
+      value: 42,
+    },
+    {
+      name: "a seven-day reset",
+      body: { seven_day: { utilization: 31, resets_at: null } },
+      window: "seven-day",
+      value: 31,
+    },
+  ] as const;
+
+  it.each(nullableRollingWindowResetCases)("treats null $name metadata as reset-unavailable while retaining usage", async ({ body, window, value }) => {
+    const runFetch = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, body),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const result = await runFetch(usageRequest("claude-code", window));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window },
+        value,
+      },
+    });
+    if (result.ok) {
+      expect(result.snapshot).not.toHaveProperty("resetsAtEpochMs");
+    }
+  });
+
+  const preservedRollingWindowResetCases: readonly {
+    readonly name: string;
+    readonly body: unknown;
+    readonly window: "five-hour" | "seven-day";
+    readonly value: number;
+    readonly resetsAtEpochMs?: number;
+  }[] = [
+    {
+      name: "an omitted five-hour reset",
+      body: { five_hour: { utilization: 42 } },
+      window: "five-hour",
+      value: 42,
+    },
+    {
+      name: "a valid five-hour reset",
+      body: { five_hour: { utilization: 42, resets_at: "2026-07-07T12:00:00Z" } },
+      window: "five-hour",
+      value: 42,
+      resetsAtEpochMs: Date.parse("2026-07-07T12:00:00Z"),
+    },
+    {
+      name: "an unparseable five-hour reset",
+      body: { five_hour: { utilization: 42, resets_at: "not-a-date" } },
+      window: "five-hour",
+      value: 42,
+    },
+    {
+      name: "an omitted seven-day reset",
+      body: { seven_day: { utilization: 31 } },
+      window: "seven-day",
+      value: 31,
+    },
+    {
+      name: "a valid seven-day reset",
+      body: { seven_day: { utilization: 31, resets_at: "2026-07-10T12:00:00Z" } },
+      window: "seven-day",
+      value: 31,
+      resetsAtEpochMs: Date.parse("2026-07-10T12:00:00Z"),
+    },
+    {
+      name: "an unparseable seven-day reset",
+      body: { seven_day: { utilization: 31, resets_at: "not-a-date" } },
+      window: "seven-day",
+      value: 31,
+    },
+  ] as const;
+
+  it.each(preservedRollingWindowResetCases)("preserves $name normalization", async ({ body, window, value, resetsAtEpochMs }) => {
+    const runFetch = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, body),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const result = await runFetch(usageRequest("claude-code", window));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        coverage: { kind: "rolling-window", window },
+        value,
+      },
+    });
+    if (result.ok && resetsAtEpochMs === undefined) {
+      expect(result.snapshot).not.toHaveProperty("resetsAtEpochMs");
+    }
+    if (result.ok && resetsAtEpochMs !== undefined) {
+      expect(result.snapshot).toMatchObject({ resetsAtEpochMs });
+    }
+  });
+
+  const strictRollingWindowResetCases = [
+    {
+      name: "a boolean five-hour reset",
+      body: { five_hour: { resets_at: false } },
+      window: "five-hour",
+      diagnostic: {
+        code: "claude-code-usage-five-hour-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "boolean",
+      },
+    },
+    {
+      name: "an array five-hour reset",
+      body: { five_hour: { resets_at: [] } },
+      window: "five-hour",
+      diagnostic: {
+        code: "claude-code-usage-five-hour-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "array",
+      },
+    },
+    {
+      name: "a numeric five-hour reset",
+      body: { five_hour: { resets_at: 1 } },
+      window: "five-hour",
+      diagnostic: {
+        code: "claude-code-usage-five-hour-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "number",
+      },
+    },
+    {
+      name: "an object five-hour reset",
+      body: { five_hour: { resets_at: {} } },
+      window: "five-hour",
+      diagnostic: {
+        code: "claude-code-usage-five-hour-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "object",
+      },
+    },
+    {
+      name: "a boolean seven-day reset",
+      body: { seven_day: { resets_at: false } },
+      window: "seven-day",
+      diagnostic: {
+        code: "claude-code-usage-seven-day-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "boolean",
+      },
+    },
+    {
+      name: "an array seven-day reset",
+      body: { seven_day: { resets_at: [] } },
+      window: "seven-day",
+      diagnostic: {
+        code: "claude-code-usage-seven-day-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "array",
+      },
+    },
+    {
+      name: "a numeric seven-day reset",
+      body: { seven_day: { resets_at: 1 } },
+      window: "seven-day",
+      diagnostic: {
+        code: "claude-code-usage-seven-day-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "number",
+      },
+    },
+    {
+      name: "an object seven-day reset",
+      body: { seven_day: { resets_at: {} } },
+      window: "seven-day",
+      diagnostic: {
+        code: "claude-code-usage-seven-day-resets-at-invalid",
+        expectedType: "string",
+        receivedType: "object",
+      },
+    },
+  ] as const;
+
+  it.each(strictRollingWindowResetCases)("keeps $name on the shared strict diagnostic path", async ({ body, window, diagnostic }) => {
+    const runFetch = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, body),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const result = await runFetch(usageRequest("claude-code", window));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        category: "validation-drift",
+        diagnostics: { responseDiagnostic: diagnostic },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(`${window.replace("-", "_")}.resets_at`);
+  });
+
+  it.each(structuralMismatchCases)("classifies $name through the shared diagnostic seam", async ({ body, diagnostic }) => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = claudeCodeEffectSourceFetch(
+      captured,
+      respondJson(200, body),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const result = await runFetch(usageRequest("claude-code", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        category: "validation-drift",
+        diagnostics: { responseDiagnostic: diagnostic },
+      },
+    });
+    expect(captured).toHaveLength(1);
+  });
+
+  it("does not serialize a fabricated invalid response value or a dynamic field path", async () => {
+    const responseValueSentinel = "fixture-response-value-sentinel";
+    const runFetch = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, { five_hour: { utilization: responseValueSentinel } }),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const result = await runFetch(usageRequest("claude-code", "five-hour"));
+    const serialized = JSON.stringify(result);
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        category: "validation-drift",
+        diagnostics: {
+          responseDiagnostic: {
+            code: "claude-code-usage-five-hour-utilization-invalid",
+            expectedType: "number-or-null",
+            receivedType: "string",
+          },
+        },
+      },
+    });
+    expect(serialized).not.toContain(responseValueSentinel);
+    expect(serialized).not.toContain(CLAUDE_CODE_ACCESS_TOKEN);
+    expect(serialized).not.toContain("five_hour.utilization");
+    expect(serialized).not.toContain("ParseError");
+  });
+
+  it("keeps missing optional windows and excess response fields tolerated", async () => {
+    const missingWindow = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, { seven_day: { utilization: 31 } }),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+    const withExcessFields = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, { five_hour: { utilization: 42 }, unrecognized_response_section: { ignored: true } }),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    expect(await missingWindow(usageRequest("claude-code", "five-hour"))).toMatchObject({
+      ok: false,
+      failure: {
+        category: "no-data-yet",
+        provider: { reasonCode: "usage-claude-window-not-returned" },
+      },
+    });
+    expect(await withExcessFields(usageRequest("claude-code", "five-hour"))).toMatchObject({
+      ok: true,
+      snapshot: { value: 42 },
+    });
+  });
+
   it("reads the local Keychain credential, fetches the OAuth usage endpoint, and decodes at the source", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = claudeCodeEffectSourceFetch(

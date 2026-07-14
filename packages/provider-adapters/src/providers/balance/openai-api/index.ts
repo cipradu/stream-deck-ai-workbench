@@ -54,7 +54,7 @@ export const openAiApiBalanceProviderModule = {
   // Effect-native source fetch: the paginating
   // twin of the anthropic adapter. An `Effect` program that consumes the `@effect/platform`
   // `HttpClient`, walks the cost-report pages, decodes each page at the source via
-  // `requestJsonSchema` (schemaBodyJson, ONE attempt per page, NO retry), accumulates the
+  // `requestJsonSchema` (central one-read JSON decoder, ONE attempt per page, NO retry), accumulates the
   // buckets, and yields the plain normalized snapshot (pagination completeness is enforced in
   // `normalize`). The Effect-native scheduler consumes this adapter Effect directly (no Promise
   // bridge on the live path); the scheduler remains the single retry owner.

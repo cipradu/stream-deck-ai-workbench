@@ -23,6 +23,8 @@ import {
   ProbeRequired,
   ProviderUnavailable,
   RateLimited,
+  RESPONSE_DIAGNOSTIC_CATALOG,
+  RESPONSE_DIAGNOSTIC_RECEIVED_TYPES,
   SettingsValidationFailure,
   StaleCachedValue,
   TAGGED_ERROR_CATEGORY,
@@ -33,7 +35,9 @@ import {
   ValidationDrift,
   catchAllTaggedFailures,
   createSanitizedFailure,
+  getResponseDiagnosticReceivedTypeSelector,
   mapProviderFailure,
+  normalizeResponseDiagnostic,
   taggedFailureToSanitizedFailure,
   type SanitizedTaggedError,
 } from "../src/index.js";
@@ -49,6 +53,7 @@ function sorted(values: readonly string[]): readonly string[] {
 }
 
 const TAGGED_CAUSE_NEEDLE = "raw internal cause with fake-bearer-token-should-not-leak";
+const RESPONSE_DIAGNOSTIC_SENTINEL = "fabricated-sensitive-response-diagnostic-sentinel";
 
 const TAGGED_ERROR_SAMPLES: readonly SanitizedTaggedError[] = [
   new MissingCredentials({ reasonCode: "provider-missing-key" }),
@@ -157,6 +162,212 @@ describe("@ai-workbench/errors sanitized failures", () => {
       reasonCode: "raw-cause-pretty-output",
     });
     expect(JSON.stringify(failure)).not.toContain(RAW_NEEDLES.providerBody);
+  });
+});
+
+describe("@ai-workbench/errors response diagnostic catalog", () => {
+  it("owns frozen static selectors only for structural response diagnostic codes", () => {
+    const structuralSelectors = {
+      "claude-code-usage-root-not-object": [],
+      "claude-code-usage-five-hour-not-object": ["five_hour"],
+      "claude-code-usage-five-hour-utilization-invalid": ["five_hour", "utilization"],
+      "claude-code-usage-five-hour-resets-at-invalid": ["five_hour", "resets_at"],
+      "claude-code-usage-seven-day-not-object": ["seven_day"],
+      "claude-code-usage-seven-day-utilization-invalid": ["seven_day", "utilization"],
+      "claude-code-usage-seven-day-resets-at-invalid": ["seven_day", "resets_at"],
+    } as const;
+
+    for (const [code, selector] of Object.entries(structuralSelectors)) {
+      const receivedTypeSelector = getResponseDiagnosticReceivedTypeSelector(code);
+      expect(receivedTypeSelector).toEqual(selector);
+      expect(Object.isFrozen(receivedTypeSelector)).toBe(true);
+    }
+
+    for (const code of [
+      "response-body-unreadable",
+      "response-body-empty",
+      "response-body-not-json",
+      "response-json-schema-mismatch",
+      "unregistered-response-diagnostic",
+    ]) {
+      expect(getResponseDiagnosticReceivedTypeSelector(code)).toBeUndefined();
+    }
+    expect(getResponseDiagnosticReceivedTypeSelector({ code: "claude-code-usage-root-not-object" })).toBeUndefined();
+  });
+
+  it("normalizes every catalog member with only its fixed expected and permitted received types", () => {
+    const permittedReceivedTypes = {
+      "claude-code-usage-root-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-usage-five-hour-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-usage-five-hour-utilization-invalid": ["array", "boolean", "object", "string"],
+      "claude-code-usage-five-hour-resets-at-invalid": ["array", "boolean", "null", "number", "object"],
+      "claude-code-usage-seven-day-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-usage-seven-day-utilization-invalid": ["array", "boolean", "object", "string"],
+      "claude-code-usage-seven-day-resets-at-invalid": ["array", "boolean", "null", "number", "object"],
+    } as const;
+
+    for (const [code, definition] of Object.entries(RESPONSE_DIAGNOSTIC_CATALOG)) {
+      if (definition.expectedType === undefined) {
+        expect(normalizeResponseDiagnostic({ code })).toEqual({ code });
+        for (const receivedType of RESPONSE_DIAGNOSTIC_RECEIVED_TYPES) {
+          expect(normalizeResponseDiagnostic({ code, receivedType })).toBeUndefined();
+        }
+        continue;
+      }
+
+      expect(normalizeResponseDiagnostic({ code })).toBeUndefined();
+      const permitted = permittedReceivedTypes[code as keyof typeof permittedReceivedTypes];
+      for (const receivedType of RESPONSE_DIAGNOSTIC_RECEIVED_TYPES) {
+        if (permitted.includes(receivedType as never)) {
+          expect(normalizeResponseDiagnostic({ code, receivedType })).toEqual({
+            code,
+            expectedType: definition.expectedType,
+            receivedType,
+          });
+        } else {
+          expect(normalizeResponseDiagnostic({ code, receivedType })).toBeUndefined();
+        }
+      }
+    }
+  });
+
+  it("rejects inherited catalog names and resists catalog mutation", () => {
+    for (const inheritedCode of ["toString", "constructor", "__proto__"]) {
+      expect(normalizeResponseDiagnostic({ code: inheritedCode })).toBeUndefined();
+    }
+
+    expect(Object.isFrozen(RESPONSE_DIAGNOSTIC_CATALOG)).toBe(true);
+    expect(Object.isFrozen(RESPONSE_DIAGNOSTIC_CATALOG["claude-code-usage-root-not-object"])).toBe(true);
+    expect(
+      Object.isFrozen(RESPONSE_DIAGNOSTIC_CATALOG["claude-code-usage-root-not-object"].receivedTypes),
+    ).toBe(true);
+    expect(
+      Reflect.set(
+        RESPONSE_DIAGNOSTIC_CATALOG as Record<string, unknown>,
+        "response-body-empty",
+        { expectedType: "object" },
+      ),
+    ).toBe(false);
+    expect(normalizeResponseDiagnostic({ code: "response-body-empty" })).toEqual({
+      code: "response-body-empty",
+    });
+  });
+
+  it("drops unregistered, malformed, and value-bearing response diagnostic input", () => {
+    const invalidInputs: readonly unknown[] = [
+      undefined,
+      null,
+      [],
+      { code: "unregistered-response-diagnostic", receivedType: "array" },
+      { code: "response-body-empty", expectedType: "object" },
+      { code: "claude-code-usage-root-not-object" },
+      { code: "claude-code-usage-root-not-object", receivedType: "number-or-null" },
+      {
+        code: "claude-code-usage-root-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      },
+      {
+        code: "claude-code-usage-root-not-object",
+        receivedType: "array",
+        dynamicPath: "root.untrusted",
+        explanation: RESPONSE_DIAGNOSTIC_SENTINEL,
+        value: RESPONSE_DIAGNOSTIC_SENTINEL,
+      },
+      { code: RESPONSE_DIAGNOSTIC_SENTINEL, receivedType: "array" },
+      { code: 42, receivedType: "array" },
+      { code: "claude-code-usage-root-not-object", receivedType: 42 },
+    ];
+
+    for (const input of invalidInputs) {
+      expect(normalizeResponseDiagnostic(input)).toBeUndefined();
+    }
+  });
+
+  it("keeps only a normalized response diagnostic on tagged and plain validation failures", () => {
+    const tagged = new ValidationDrift({
+      reasonCode: "response-schema-invalid",
+      fieldPaths: ["dynamic.provider.path", RESPONSE_DIAGNOSTIC_SENTINEL],
+      internalCause: new Error(RESPONSE_DIAGNOSTIC_SENTINEL),
+      responseDiagnostic: {
+        code: "claude-code-usage-root-not-object",
+        receivedType: "array",
+      },
+    });
+    const plain = taggedFailureToSanitizedFailure(tagged);
+    const serialized = JSON.stringify(tagged) + JSON.stringify(plain);
+
+    expect(tagged).toMatchObject({
+      reasonCode: "claude-code-usage-root-not-object",
+      responseDiagnostic: {
+        code: "claude-code-usage-root-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      },
+    });
+    expect(tagged).not.toHaveProperty("fieldPaths");
+    expect(tagged).not.toHaveProperty("internalCause");
+    expect(plain.diagnostics).toEqual({
+      reasonCode: "claude-code-usage-root-not-object",
+      responseDiagnostic: {
+        code: "claude-code-usage-root-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      },
+    });
+    expect(serialized).not.toContain(RESPONSE_DIAGNOSTIC_SENTINEL);
+  });
+
+  it("strips unsafe response diagnostic input from non-validation tagged errors before serialization", () => {
+    const tagged = new NetworkFailure({
+      reasonCode: "provider-network",
+      responseDiagnostic: {
+        code: "claude-code-usage-root-not-object",
+        receivedType: "array",
+        value: RESPONSE_DIAGNOSTIC_SENTINEL,
+      },
+    } as never);
+    const plain = taggedFailureToSanitizedFailure(tagged);
+    const serialized = JSON.stringify(tagged) + JSON.stringify(plain);
+
+    expect(tagged).not.toHaveProperty("responseDiagnostic");
+    expect(plain.diagnostics).not.toHaveProperty("responseDiagnostic");
+    expect(serialized).not.toContain(RESPONSE_DIAGNOSTIC_SENTINEL);
+  });
+
+  it("fails closed when hostile proxy reflection throws", () => {
+    const marker = "fabricated-hostile-proxy-throw-marker";
+    const hostile = new Proxy(
+      {},
+      {
+        getPrototypeOf: () => {
+          throw new Error(marker);
+        },
+      },
+    );
+    let result: ReturnType<typeof normalizeResponseDiagnostic>;
+
+    expect(() => {
+      result = normalizeResponseDiagnostic(hostile);
+    }).not.toThrow();
+    expect(result).toBeUndefined();
+    expect(String(JSON.stringify(result))).not.toContain(marker);
+  });
+
+  it("preserves legacy field paths and validation-drift category and retry behavior for non-response callers", () => {
+    const failure = taggedFailureToSanitizedFailure(
+      new ValidationDrift({
+        reasonCode: "provider-schema-drift",
+        fieldPaths: ["balance.remaining"],
+      }),
+    );
+
+    expect(failure.category).toBe("validation-drift");
+    expect(failure.retryClass).toBe("rate-limit-backoff");
+    expect(failure.diagnostics).toEqual({
+      fieldPaths: ["balance.remaining"],
+      reasonCode: "provider-schema-drift",
+    });
   });
 });
 

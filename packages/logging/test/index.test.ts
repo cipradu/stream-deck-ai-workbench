@@ -109,6 +109,35 @@ describe("@ai-workbench/logging context allow-list", () => {
     expect(serialized).not.toContain(RAW_NEEDLES.money);
     expect(serialized).not.toContain(RAW_NEEDLES.token);
   });
+
+  it("preserves only fixed response type labels and drops general response metadata", () => {
+    const context = sanitizeLogContext({
+      expectedResponseType: "number-or-null",
+      receivedResponseType: "array",
+      responseDiagnostic: {
+        code: "claude-code-usage-five-hour-utilization-invalid",
+        explanation: "fabricated-sensitive-log-response-diagnostic-sentinel",
+      },
+    });
+
+    expect(context).toEqual({
+      expectedResponseType: "number-or-null",
+      receivedResponseType: "array",
+    });
+    expect(JSON.stringify(context)).not.toContain("fabricated-sensitive-log-response-diagnostic-sentinel");
+  });
+
+  it("drops arbitrary response type labels and fabricated sentinels", () => {
+    const sentinel = "fabricated-sensitive-log-response-type-sentinel";
+    const context = sanitizeLogContext({
+      expectedResponseType: sentinel,
+      receivedResponseType: sentinel,
+      responseDiagnostic: sentinel,
+    });
+
+    expect(context).toEqual({});
+    expect(JSON.stringify(context)).not.toContain(sentinel);
+  });
 });
 
 describe("@ai-workbench/logging sanitized event contract", () => {

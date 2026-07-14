@@ -18,6 +18,19 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 
 export type LogHttpStatusClass = "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "unknown";
 
+export const RESPONSE_DIAGNOSTIC_EXPECTED_TYPES = ["object", "string", "number", "number-or-null"] as const;
+export type ResponseDiagnosticExpectedType = (typeof RESPONSE_DIAGNOSTIC_EXPECTED_TYPES)[number];
+
+export const RESPONSE_DIAGNOSTIC_RECEIVED_TYPES = [
+  "array",
+  "boolean",
+  "null",
+  "number",
+  "object",
+  "string",
+] as const;
+export type ResponseDiagnosticReceivedType = (typeof RESPONSE_DIAGNOSTIC_RECEIVED_TYPES)[number];
+
 export interface SanitizedLogContext {
   readonly providerId?: ProviderId;
   readonly actionFamilyId?: ActionFamilyId;
@@ -27,6 +40,8 @@ export interface SanitizedLogContext {
   readonly retryClass?: RetryClass;
   readonly elapsedMs?: number;
   readonly correlationId?: string;
+  readonly expectedResponseType?: ResponseDiagnosticExpectedType;
+  readonly receivedResponseType?: ResponseDiagnosticReceivedType;
 }
 
 export interface SanitizedLogEvent {
@@ -118,6 +133,8 @@ export function sanitizeLogContext(input: Readonly<Record<string, unknown>> = {}
       : undefined;
   const correlationId =
     typeof input.correlationId === "string" ? sanitizeCorrelationId(input.correlationId) : undefined;
+  const expectedResponseType = stringInSet(input.expectedResponseType, RESPONSE_DIAGNOSTIC_EXPECTED_TYPES);
+  const receivedResponseType = stringInSet(input.receivedResponseType, RESPONSE_DIAGNOSTIC_RECEIVED_TYPES);
 
   return {
     ...(providerId === undefined ? {} : { providerId }),
@@ -128,6 +145,8 @@ export function sanitizeLogContext(input: Readonly<Record<string, unknown>> = {}
     ...(retryClass === undefined ? {} : { retryClass }),
     ...(elapsedMs === undefined ? {} : { elapsedMs }),
     ...(correlationId === undefined ? {} : { correlationId }),
+    ...(expectedResponseType === undefined ? {} : { expectedResponseType }),
+    ...(receivedResponseType === undefined ? {} : { receivedResponseType }),
   };
 }
 

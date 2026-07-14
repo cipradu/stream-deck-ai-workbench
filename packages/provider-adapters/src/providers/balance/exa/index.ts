@@ -49,7 +49,7 @@ export const exaBalanceProviderModule = {
   },
   // Effect-native source fetch: a two-step
   // `Effect` program (api-key discovery -> usage) that consumes the `@effect/platform`
-  // `HttpClient` and decodes at the source via `requestJsonSchema` (schemaBodyJson, ONE attempt
+  // `HttpClient` and decodes at the source via `requestJsonSchema` (central one-read JSON decoder, ONE attempt
   // per call, NO retry). The discovered api-key id is cached in this adapter closure exactly as
   // the Promise path did, so repeat calls skip discovery; a 4xx on the usage call invalidates
   // that cache so the next call re-discovers. The Effect-native scheduler consumes this adapter

@@ -61,7 +61,7 @@ const CodexCreditsSchema = Schema.Struct({
 const decodeCreditsBalance = Schema.decodeUnknownOption(CodexCreditsSchema);
 
 // Reset-credits endpoint response, from the DEDICATED
-// `/backend-api/wham/rate-limit-reset-credits` endpoint, decoded at the source via schemaBodyJson.
+// `/backend-api/wham/rate-limit-reset-credits` endpoint, decoded at the source via the central one-read JSON decoder.
 // TOLERANT on both consumed fields (same isolation ethos as the credits decode): `available_count`
 // and each `credits[]` element are strict-decoded SEPARATELY below, so a malformed count fails SOFT to
 // a clean "resets not returned" no-data (never a hard ValidationDrift, never a fake 0) and a single
@@ -116,7 +116,7 @@ export const codexUsageProviderModule = {
   // past the read->wrap point), builds the usage request with the raw values at the
   // `authorization: Bearer ...` and `chatgpt-account-id` headers (the adapter's ONLY two
   // `Redacted.value` unwrap sites, one per field), decodes at the source via `requestJsonSchema`
-  // (schemaBodyJson, ONE attempt per HTTP call, NO scheduler backoff), and yields the plain
+  // (central one-read JSON decoder, ONE attempt per HTTP call, NO scheduler backoff), and yields the plain
   // normalized usage snapshot. The one PROVIDER AUTH behavior preserved verbatim is an UNGATED
   // one-shot credential re-read + retry on a 401 (`Effect.catchTag("UnauthorizedExpired")`); codex
   // has NO proactive stale re-read (`auth.json` carries no `expiresAt`) and therefore NO shared

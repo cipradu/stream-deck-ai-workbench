@@ -1,5 +1,5 @@
-import { HttpClient as PlatformHttpClient } from "@effect/platform";
-import { Context, Effect, Either, Option } from "effect";
+import { HttpClient as PlatformHttpClient, HttpClientResponse } from "@effect/platform";
+import { Context, Effect, Either, Option, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { createSanitizedFailure, UnauthorizedExpired } from "../../errors/src/index.js";
@@ -7,7 +7,9 @@ import type { GovernorSourceLease } from "../../scheduler/src/index.js";
 
 import {
   governedAdapterFetchAttempt,
+  governedRequestJsonSchema,
   makeGovernorBackedAttemptContext,
+  ProviderAdapterAttemptContext,
 } from "../src/governed-request.js";
 import type { AdapterFetchFailure } from "../src/effect-fetch.js";
 
@@ -33,6 +35,50 @@ function testLease(events: string[]): GovernorSourceLease {
 }
 
 describe("governed adapter attempt seam", () => {
+  it("forwards a registered response classifier through one governed JSON attempt", async () => {
+    const events: string[] = [];
+    let requests = 0;
+    const context = makeGovernorBackedAttemptContext(testLease(events));
+    const httpClient = PlatformHttpClient.make((request) => {
+      requests += 1;
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response("[]", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+    });
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        governedRequestJsonSchema(
+          { url: "https://provider.example.test/usage" },
+          Schema.Struct({ utilization: Schema.Number }),
+          { responseClassifier: () => "claude-code-usage-root-not-object" },
+        ).pipe(
+          Effect.provideService(ProviderAdapterAttemptContext, context),
+          Effect.provideService(PlatformHttpClient.HttpClient, httpClient),
+        ),
+      ),
+    );
+
+    expect(Either.isLeft(outcome)).toBe(true);
+    const failure = Option.getOrThrow(Either.getLeft(outcome));
+    expect(failure._tag).toBe("ValidationDrift");
+    if (failure._tag === "ValidationDrift") {
+      expect(failure.responseDiagnostic).toEqual({
+        code: "claude-code-usage-root-not-object",
+        expectedType: "object",
+        receivedType: "array",
+      });
+    }
+    expect(requests).toBe(1);
+    expect(events).toEqual(["acquire", "release"]);
+  });
+
   it("preserves an adapter operation's typed success, error, and environment while bracketing one fresh permit", async () => {
     const events: string[] = [];
     const HttpDependency = Context.GenericTag<{ readonly baseUrl: string }>("test/HttpDependency");

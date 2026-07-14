@@ -12,7 +12,7 @@ import type { ProviderAdapterAttemptContext } from "./governed-request.js";
 //
 // A migrated adapter is an `Effect` program that consumes the `@effect/platform`
 // `HttpClient` and decodes at the source via `packages/http`'s `requestJsonSchema`
-// (schemaBodyJson, ONE attempt, NO retry). This module defines the shared shape of that
+// (central one-read JSON decoder, ONE attempt, NO retry). This module defines the shared shape of that
 // program (`Effect*SchedulerFetch`, leaving `HttpClient` in the context channel for its
 // consumer to satisfy) and the tagged->plain failure mapping (`schedulerFailureFromTagged`).
 // The Effect-native scheduler consumes these adapter Effects DIRECTLY — it provides

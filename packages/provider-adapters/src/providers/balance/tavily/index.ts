@@ -36,7 +36,7 @@ export const tavilyBalanceProviderModule = {
   },
   // Effect-native source fetch: an `Effect`
   // program that consumes the `@effect/platform` `HttpClient`, builds the request with the
-  // credential, decodes at the source via `requestJsonSchema` (schemaBodyJson, ONE attempt,
+  // credential, decodes at the source via `requestJsonSchema` (central one-read JSON decoder, ONE attempt,
   // NO retry), and yields the plain normalized snapshot. The Effect-native scheduler consumes
   // this adapter Effect directly (no Promise bridge on the live path); the scheduler remains the
   // single retry owner.

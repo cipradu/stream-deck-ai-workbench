@@ -54,7 +54,7 @@ export const minimaxUsageProviderModule = {
   // with z.ai — an `Effect` program that consumes the `@effect/platform` `HttpClient`, resolves the
   // `Redacted` credential from global settings, builds the single `GET /v1/coding_plan/remains`
   // request with the raw key at the `authorization: Bearer <key>` header (the SINGLE `Redacted.value`
-  // unwrap), decodes at the source via `requestJsonSchema` (schemaBodyJson, ONE attempt, NO retry),
+  // unwrap), decodes at the source via `requestJsonSchema` (central one-read JSON decoder, ONE attempt, NO retry),
   // and yields the plain normalized usage snapshot. The Effect-native scheduler consumes this adapter
   // Effect directly (no Promise bridge on the live path) and remains the single retry owner.
   createSourceFetchEffect(input: CreateUsageProviderSourceFetchInput): EffectUsageSchedulerFetch {

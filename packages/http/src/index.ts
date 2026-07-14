@@ -1,4 +1,4 @@
-import { Clock, Duration, Effect, Layer, Option, type Schema } from "effect";
+import { Clock, Duration, Effect, Layer, Option, Schema } from "effect";
 import {
   FetchHttpClient,
   Headers as PlatformHeaders,
@@ -18,7 +18,12 @@ import {
   Timeout,
   UnauthorizedExpired,
   ValidationDrift,
+  getResponseDiagnosticReceivedTypeSelector,
   httpStatusClassOf,
+  normalizeResponseDiagnostic,
+  type ResponseDiagnosticCode,
+  type ResponseDiagnosticInput,
+  type ResponseDiagnosticReceivedType,
   type SanitizedTaggedError,
 } from "@ai-workbench/errors";
 
@@ -41,6 +46,13 @@ export interface HttpJsonRequest {
 export interface HttpRetryClassificationInput {
   readonly retryAfterSeconds?: number;
 }
+
+/**
+ * A provider-owned, advisory classifier for a parsed JSON response. It may select
+ * only a registered static response-diagnostic code; the shared JSON decoder
+ * validates the result and Effect Schema remains the acceptance authority.
+ */
+export type JsonResponseClassifier = (parsed: unknown) => ResponseDiagnosticCode | undefined;
 
 // ---------------------------------------------------------------------------
 // Effect-native public surface.
@@ -104,36 +116,40 @@ export function executeRequest(
 }
 
 /**
- * Decodes a 2xx response body via an Effect Schema at the source (`schemaBodyJson`),
- * yielding the typed value. Any decode failure — a `ParseError` (body did not match
- * the schema) or a `ResponseError` (body was not readable JSON) — maps to a sanitized
- * `ValidationDrift`; the raw parse diagnostic and body are discarded.
+ * Decodes a 2xx response through the central one-read JSON decoder, yielding the
+ * typed schema value. The body is read once, parsed transiently, and accepted only
+ * by Effect Schema; raw body text and parser/schema failures are discarded.
  */
 export function decodeJsonBody<A, I, R>(
   response: HttpClientResponse.HttpClientResponse,
   schema: Schema.Schema<A, I, R>,
+  responseClassifier?: JsonResponseClassifier,
 ): Effect.Effect<A, ValidationDrift, R> {
-  return HttpClientResponse.schemaBodyJson(schema)(response).pipe(
-    Effect.mapError(() => bodyValidationDrift("http-response-schema", "response-schema-invalid")),
+  return response.text.pipe(
+    Effect.mapError(() => responseValidationDrift("response-body-unreadable")),
+    Effect.flatMap((body) => decodeJsonText(body, schema, responseClassifier)),
   );
 }
 
-/**
- * Options honored by `requestJsonSchema` and `requestTextBody`: only `defaultTimeoutMs`.
- * The `HttpClient` layer is provided at the runtime root, not per call, so `httpClientLayer`
- * is not advertised here. The per-request deadline override and the caller-abort signal
- * travel on `HttpJsonRequest` (`timeoutMs` / `signal`), so they are not duplicated onto
- * this options bag.
- */
-export interface RequestJsonSchemaOptions {
+/** Shared non-JSON-specific request options. */
+export interface RequestTextBodyOptions {
   readonly defaultTimeoutMs?: number;
 }
 
 /**
- * The whole Effect-native pipeline in one call: build → execute-once → `schemaBodyJson`
- * decode, with the ENTIRE pipeline — execute AND the lazily-read response body + decode —
- * bounded by ONE `Effect.timeout` deadline and the optional caller-abort race (decode
- * inside the deadline). A standalone
+ * Options honored only by the JSON request path. The `HttpClient` layer is provided
+ * at the runtime root, not per call, and the per-request deadline override and
+ * caller-abort signal travel on `HttpJsonRequest` (`timeoutMs` / `signal`).
+ */
+export interface RequestJsonSchemaOptions extends RequestTextBodyOptions {
+  readonly responseClassifier?: JsonResponseClassifier;
+}
+
+/**
+ * The whole Effect-native pipeline in one call: build → execute-once → central one-read
+ * JSON decode, with the ENTIRE pipeline — execute AND the lazily-read response body +
+ * decode — bounded by ONE `Effect.timeout` deadline and the optional caller-abort race
+ * (decode inside the deadline). A standalone
  * caller with no outer deadline is therefore protected from a stalled response body:
  * `request.timeoutMs`/`request.signal` bound the body read, not merely the execute/header
  * phase. Yields the typed decoded value or fails with a tagged error from the shared
@@ -149,7 +165,7 @@ export function requestJsonSchema<A, I, R>(
 ): Effect.Effect<A, SanitizedTaggedError, PlatformHttpClient.HttpClient | R> {
   const timeoutMs = normalizeTimeout(request.timeoutMs ?? options.defaultTimeoutMs);
   const withBody = executeAndClassify(buildRequest(request)).pipe(
-    Effect.flatMap((response) => decodeJsonBody(response, schema)),
+    Effect.flatMap((response) => decodeJsonBody(response, schema, options.responseClassifier)),
   );
   return withTransportTimeoutAbort(withBody, timeoutMs, request.signal);
 }
@@ -166,14 +182,14 @@ export function requestJsonSchema<A, I, R>(
  * `executeAndClassify` + `decodeText` + `withTransportTimeoutAbort` core — no duplicated
  * status/Retry-After/timeout/transport logic. `HttpClient` is left in the context channel
  * for the adapter to satisfy with `fetchHttpClientLayer` at the runtime root. One attempt,
- * NO retry. Shares `RequestJsonSchemaOptions` (both Effect helpers only read
- * `defaultTimeoutMs`).
+ * NO retry. Its options intentionally expose only `defaultTimeoutMs`; a JSON
+ * response classifier is not meaningful for a text-body request.
  *
  * Named `requestTextBody` (the plain-text-body counterpart to `requestJsonSchema`).
  */
 export function requestTextBody(
   request: HttpJsonRequest,
-  options: RequestJsonSchemaOptions = {},
+  options: RequestTextBodyOptions = {},
 ): Effect.Effect<string, SanitizedTaggedError, PlatformHttpClient.HttpClient> {
   const timeoutMs = normalizeTimeout(request.timeoutMs ?? options.defaultTimeoutMs);
   const withBody = executeAndClassify(buildRequest(request)).pipe(
@@ -251,6 +267,117 @@ function buildRequest(request: HttpJsonRequest): HttpClientRequest.HttpClientReq
 
 function decodeText(response: HttpClientResponse.HttpClientResponse): Effect.Effect<string, ValidationDrift> {
   return response.text.pipe(Effect.mapError(() => bodyValidationDrift("http-response-text", "response-text-invalid")));
+}
+
+function decodeJsonText<A, I, R>(
+  body: string,
+  schema: Schema.Schema<A, I, R>,
+  responseClassifier: JsonResponseClassifier | undefined,
+): Effect.Effect<A, ValidationDrift, R> {
+  if (body.trim().length === 0) {
+    return Effect.fail(responseValidationDrift("response-body-empty"));
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return Effect.fail(responseValidationDrift("response-body-not-json"));
+  }
+
+  return Schema.decodeUnknown(schema)(parsed).pipe(
+    Effect.catchAll(() => Effect.fail(schemaValidationDrift(parsed, responseClassifier))),
+  );
+}
+
+function schemaValidationDrift(parsed: unknown, responseClassifier: JsonResponseClassifier | undefined): ValidationDrift {
+  const classified = classifierResponseDiagnostic(parsed, responseClassifier);
+  return responseValidationDrift(classified?.code ?? "response-json-schema-mismatch", classified?.receivedType);
+}
+
+function classifierResponseDiagnostic(
+  parsed: unknown,
+  responseClassifier: JsonResponseClassifier | undefined,
+): ResponseDiagnosticInput | undefined {
+  if (responseClassifier === undefined) {
+    return undefined;
+  }
+
+  try {
+    const code = responseClassifier(parsed);
+    const receivedType = responseDiagnosticReceivedType(parsed, code);
+    if (receivedType === undefined) {
+      return undefined;
+    }
+    const diagnostic = normalizeResponseDiagnostic({
+      code,
+      receivedType,
+    });
+    return diagnostic === undefined
+      ? undefined
+      : {
+          code: diagnostic.code,
+          ...(diagnostic.receivedType === undefined ? {} : { receivedType: diagnostic.receivedType }),
+        };
+  } catch {
+    return undefined;
+  }
+}
+
+function responseDiagnosticReceivedType(
+  parsed: unknown,
+  code: unknown,
+): ResponseDiagnosticReceivedType | undefined {
+  const receivedTypeSelector = getResponseDiagnosticReceivedTypeSelector(code);
+  if (receivedTypeSelector === undefined) {
+    return undefined;
+  }
+
+  let selected = parsed;
+  for (const segment of receivedTypeSelector) {
+    if (!isJsonObject(selected) || !Object.prototype.hasOwnProperty.call(selected, segment)) {
+      return undefined;
+    }
+    selected = selected[segment];
+  }
+  return jsonTypeOf(selected);
+}
+
+function isJsonObject(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function jsonTypeOf(input: unknown): ResponseDiagnosticReceivedType {
+  if (input === null) {
+    return "null";
+  }
+  if (Array.isArray(input)) {
+    return "array";
+  }
+  switch (typeof input) {
+    case "boolean":
+      return "boolean";
+    case "number":
+      return "number";
+    case "string":
+      return "string";
+    default:
+      return "object";
+  }
+}
+
+function responseValidationDrift(
+  code: ResponseDiagnosticCode,
+  receivedType?: ResponseDiagnosticReceivedType,
+): ValidationDrift {
+  return new ValidationDrift({
+    reasonCode: code,
+    responseDiagnostic: {
+      code,
+      ...(receivedType === undefined ? {} : { receivedType }),
+    },
+    providerFailureClass: "validation",
+  });
 }
 
 function bodyValidationDrift(boundary: string, reasonCode: string): ValidationDrift {

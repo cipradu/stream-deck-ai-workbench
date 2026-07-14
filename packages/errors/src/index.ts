@@ -91,6 +91,173 @@ export const ERROR_CATEGORY_PUBLIC_MESSAGES = {
   "unknown-sanitized-failure": "Unknown sanitized failure.",
 } as const satisfies Readonly<Record<ErrorCategory, string>>;
 
+export const RESPONSE_DIAGNOSTIC_RECEIVED_TYPES = [
+  "array",
+  "boolean",
+  "null",
+  "number",
+  "object",
+  "string",
+] as const;
+export type ResponseDiagnosticReceivedType = (typeof RESPONSE_DIAGNOSTIC_RECEIVED_TYPES)[number];
+
+export const RESPONSE_DIAGNOSTIC_EXPECTED_TYPES = ["object", "string", "number", "number-or-null"] as const;
+export type ResponseDiagnosticExpectedType = (typeof RESPONSE_DIAGNOSTIC_EXPECTED_TYPES)[number];
+
+export const RESPONSE_DIAGNOSTIC_CODES = [
+  "response-body-unreadable",
+  "response-body-empty",
+  "response-body-not-json",
+  "response-json-schema-mismatch",
+  "claude-code-usage-root-not-object",
+  "claude-code-usage-five-hour-not-object",
+  "claude-code-usage-five-hour-utilization-invalid",
+  "claude-code-usage-five-hour-resets-at-invalid",
+  "claude-code-usage-seven-day-not-object",
+  "claude-code-usage-seven-day-utilization-invalid",
+  "claude-code-usage-seven-day-resets-at-invalid",
+] as const;
+export type ResponseDiagnosticCode = (typeof RESPONSE_DIAGNOSTIC_CODES)[number];
+
+export interface ResponseDiagnosticCatalogEntry {
+  readonly expectedType?: ResponseDiagnosticExpectedType;
+  readonly receivedTypes?: readonly ResponseDiagnosticReceivedType[];
+}
+
+interface ResponseDiagnosticCatalogDefinition extends ResponseDiagnosticCatalogEntry {
+  readonly receivedTypeSelector?: readonly string[];
+}
+
+const RESPONSE_DIAGNOSTIC_ENTRY_NONE = Object.freeze({});
+const RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT = Object.freeze({
+  expectedType: "object" as const,
+  receivedTypes: Object.freeze(["array", "boolean", "null", "number", "string"] as const),
+});
+const RESPONSE_DIAGNOSTIC_ENTRY_UTILIZATION = Object.freeze({
+  expectedType: "number-or-null" as const,
+  receivedTypes: Object.freeze(["array", "boolean", "object", "string"] as const),
+});
+const RESPONSE_DIAGNOSTIC_ENTRY_RESETS_AT = Object.freeze({
+  expectedType: "string" as const,
+  receivedTypes: Object.freeze(["array", "boolean", "null", "number", "object"] as const),
+});
+
+const RESPONSE_DIAGNOSTIC_ROOT_SELECTOR = Object.freeze([] as const);
+const RESPONSE_DIAGNOSTIC_FIVE_HOUR_SELECTOR = Object.freeze(["five_hour"] as const);
+const RESPONSE_DIAGNOSTIC_FIVE_HOUR_UTILIZATION_SELECTOR = Object.freeze(["five_hour", "utilization"] as const);
+const RESPONSE_DIAGNOSTIC_FIVE_HOUR_RESETS_AT_SELECTOR = Object.freeze(["five_hour", "resets_at"] as const);
+const RESPONSE_DIAGNOSTIC_SEVEN_DAY_SELECTOR = Object.freeze(["seven_day"] as const);
+const RESPONSE_DIAGNOSTIC_SEVEN_DAY_UTILIZATION_SELECTOR = Object.freeze(["seven_day", "utilization"] as const);
+const RESPONSE_DIAGNOSTIC_SEVEN_DAY_RESETS_AT_SELECTOR = Object.freeze(["seven_day", "resets_at"] as const);
+
+const RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS: Readonly<
+  Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogDefinition>
+> = Object.freeze({
+  "response-body-unreadable": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "response-body-empty": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "response-body-not-json": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "response-json-schema-mismatch": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-usage-root-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_ROOT_SELECTOR,
+  }),
+  "claude-code-usage-five-hour-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_FIVE_HOUR_SELECTOR,
+  }),
+  "claude-code-usage-five-hour-utilization-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_UTILIZATION,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_FIVE_HOUR_UTILIZATION_SELECTOR,
+  }),
+  "claude-code-usage-five-hour-resets-at-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_RESETS_AT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_FIVE_HOUR_RESETS_AT_SELECTOR,
+  }),
+  "claude-code-usage-seven-day-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_SEVEN_DAY_SELECTOR,
+  }),
+  "claude-code-usage-seven-day-utilization-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_UTILIZATION,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_SEVEN_DAY_UTILIZATION_SELECTOR,
+  }),
+  "claude-code-usage-seven-day-resets-at-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_RESETS_AT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_SEVEN_DAY_RESETS_AT_SELECTOR,
+  }),
+} satisfies Readonly<Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogDefinition>>);
+
+export const RESPONSE_DIAGNOSTIC_CATALOG: Readonly<Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogEntry>> = Object.freeze(
+  Object.fromEntries(
+    RESPONSE_DIAGNOSTIC_CODES.map((code) => {
+      const { receivedTypeSelector: _selector, ...entry } = RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS[code];
+      return [code, Object.freeze(entry)];
+    }),
+  ) as Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogEntry>,
+);
+
+/** Returns only a finite catalog-owned static selector for a structural diagnostic. */
+export function getResponseDiagnosticReceivedTypeSelector(code: unknown): readonly string[] | undefined {
+  if (typeof code !== "string" || !hasOwn(RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS, code)) {
+    return undefined;
+  }
+  return RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS[code as ResponseDiagnosticCode].receivedTypeSelector;
+}
+
+export interface ResponseDiagnosticInput {
+  readonly code: ResponseDiagnosticCode;
+  readonly receivedType?: ResponseDiagnosticReceivedType;
+}
+
+export interface SanitizedResponseDiagnostic {
+  readonly code: ResponseDiagnosticCode;
+  readonly expectedType?: ResponseDiagnosticExpectedType;
+  readonly receivedType?: ResponseDiagnosticReceivedType;
+}
+
+/**
+ * The only response-diagnostic admission point. It constructs a fresh, finite
+ * shape and rejects any field that is not part of the catalog contract.
+ */
+export function normalizeResponseDiagnostic(input: unknown): SanitizedResponseDiagnostic | undefined {
+  try {
+    return normalizeResponseDiagnosticUnsafe(input);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeResponseDiagnosticUnsafe(input: unknown): SanitizedResponseDiagnostic | undefined {
+  if (!isPlainRecord(input) || !hasOwn(input, "code") || typeof input.code !== "string") {
+    return undefined;
+  }
+
+  const code = input.code;
+  if (!hasOwn(RESPONSE_DIAGNOSTIC_CATALOG, code)) {
+    return undefined;
+  }
+
+  const definition = RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS[code as ResponseDiagnosticCode];
+  if (definition.expectedType === undefined) {
+    return hasOnlyKeys(input, ["code"]) ? { code: code as ResponseDiagnosticCode } : undefined;
+  }
+
+  if (
+    !hasOnlyKeys(input, ["code", "receivedType"]) ||
+    !hasOwn(input, "receivedType") ||
+    !isResponseDiagnosticReceivedType(input.receivedType) ||
+    !definition.receivedTypes?.includes(input.receivedType)
+  ) {
+    return undefined;
+  }
+
+  return {
+    code: code as ResponseDiagnosticCode,
+    expectedType: definition.expectedType,
+    receivedType: input.receivedType,
+  };
+}
+
 export interface SanitizedFailureDiagnosticsInput {
   readonly reasonCode: string;
   readonly boundary?: string;
@@ -98,6 +265,7 @@ export interface SanitizedFailureDiagnosticsInput {
   readonly httpStatus?: number;
   readonly httpStatusClass?: HttpStatusClass;
   readonly issueCount?: number;
+  readonly responseDiagnostic?: ResponseDiagnosticInput;
 }
 
 export interface SanitizedFailureDiagnostics {
@@ -106,6 +274,7 @@ export interface SanitizedFailureDiagnostics {
   readonly fieldPaths?: readonly string[];
   readonly httpStatusClass?: HttpStatusClass;
   readonly issueCount?: number;
+  readonly responseDiagnostic?: SanitizedResponseDiagnostic;
 }
 
 export interface SanitizedProviderFailure {
@@ -283,18 +452,42 @@ function providerFailureClassForKind(kind: ProviderFailureInput["kind"]): Provid
 }
 
 function sanitizeDiagnostics(input: SanitizedFailureDiagnosticsInput): SanitizedFailureDiagnostics {
-  const fieldPaths = sanitizeFieldPaths(input.fieldPaths);
+  const responseDiagnosticProvided = hasOwn(input, "responseDiagnostic");
+  const responseDiagnostic = normalizeResponseDiagnostic(input.responseDiagnostic);
+  const fieldPaths = responseDiagnosticProvided ? [] : sanitizeFieldPaths(input.fieldPaths);
   const httpStatusClass =
     input.httpStatusClass ?? (input.httpStatus === undefined ? undefined : httpStatusClassOf(input.httpStatus));
   const issueCount = input.issueCount === undefined ? undefined : Math.max(0, Math.trunc(input.issueCount));
 
   return {
-    reasonCode: sanitizeReasonCode(input.reasonCode, "unknown"),
+    reasonCode: responseDiagnostic?.code ?? (responseDiagnosticProvided ? "unknown" : sanitizeReasonCode(input.reasonCode, "unknown")),
     ...(input.boundary === undefined ? {} : { boundary: sanitizeReasonCode(input.boundary, "boundary") }),
     ...(fieldPaths.length === 0 ? {} : { fieldPaths }),
     ...(httpStatusClass === undefined ? {} : { httpStatusClass }),
     ...(issueCount === undefined ? {} : { issueCount }),
+    ...(responseDiagnostic === undefined ? {} : { responseDiagnostic }),
   };
+}
+
+function isPlainRecord(input: unknown): input is Record<string, unknown> {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(input);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(input: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(input).every((key) => allowed.includes(key));
+}
+
+function hasOwn(input: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(input, key);
+}
+
+function isResponseDiagnosticReceivedType(input: unknown): input is ResponseDiagnosticReceivedType {
+  return typeof input === "string" && (RESPONSE_DIAGNOSTIC_RECEIVED_TYPES as readonly string[]).includes(input);
 }
 
 function sanitizeFieldPaths(paths: readonly string[] | undefined): readonly string[] {
@@ -359,30 +552,122 @@ export interface SanitizedErrorFields {
   readonly internalCause?: unknown;
 }
 
-export class MissingCredentials extends Data.TaggedError("MissingCredentials")<SanitizedErrorFields> {}
-export class InvalidCredentials extends Data.TaggedError("InvalidCredentials")<SanitizedErrorFields> {}
-export class InsufficientCredentialScope extends Data.TaggedError(
+export interface ValidationDriftFields extends SanitizedErrorFields {
+  readonly responseDiagnostic?: ResponseDiagnosticInput;
+}
+
+const MissingCredentialsBase = Data.TaggedError("MissingCredentials")<SanitizedErrorFields>;
+export class MissingCredentials extends MissingCredentialsBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const InvalidCredentialsBase = Data.TaggedError("InvalidCredentials")<SanitizedErrorFields>;
+export class InvalidCredentials extends InvalidCredentialsBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const InsufficientCredentialScopeBase = Data.TaggedError(
   "InsufficientCredentialScope",
-)<SanitizedErrorFields> {}
-export class UnauthorizedExpired extends Data.TaggedError("UnauthorizedExpired")<SanitizedErrorFields> {}
-export class RateLimited extends Data.TaggedError("RateLimited")<
-  SanitizedErrorFields & { readonly retryAfterSeconds?: number }
-> {}
-export class Timeout extends Data.TaggedError("Timeout")<SanitizedErrorFields> {}
-export class Abort extends Data.TaggedError("Abort")<SanitizedErrorFields> {}
-export class NetworkFailure extends Data.TaggedError("NetworkFailure")<SanitizedErrorFields> {}
-export class HttpStatusFailure extends Data.TaggedError("HttpStatusFailure")<
-  SanitizedErrorFields & { readonly statusClass: HttpStatusClass }
-> {}
-export class ProviderUnavailable extends Data.TaggedError("ProviderUnavailable")<SanitizedErrorFields> {}
-export class ValidationDrift extends Data.TaggedError("ValidationDrift")<SanitizedErrorFields> {}
-export class UnsupportedCapability extends Data.TaggedError("UnsupportedCapability")<SanitizedErrorFields> {}
-export class NoDataYet extends Data.TaggedError("NoDataYet")<SanitizedErrorFields> {}
-export class StaleCachedValue extends Data.TaggedError("StaleCachedValue")<SanitizedErrorFields> {}
-export class NotImplemented extends Data.TaggedError("NotImplemented")<SanitizedErrorFields> {}
-export class ProbeRequired extends Data.TaggedError("ProbeRequired")<SanitizedErrorFields> {}
-export class SettingsValidationFailure extends Data.TaggedError("SettingsValidationFailure")<SanitizedErrorFields> {}
-export class UnknownSanitized extends Data.TaggedError("UnknownSanitized")<SanitizedErrorFields> {}
+)<SanitizedErrorFields>;
+export class InsufficientCredentialScope extends InsufficientCredentialScopeBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const UnauthorizedExpiredBase = Data.TaggedError("UnauthorizedExpired")<SanitizedErrorFields>;
+export class UnauthorizedExpired extends UnauthorizedExpiredBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+type RateLimitedFields = SanitizedErrorFields & { readonly retryAfterSeconds?: number };
+const RateLimitedBase = Data.TaggedError("RateLimited")<RateLimitedFields>;
+export class RateLimited extends RateLimitedBase {
+  constructor(fields: RateLimitedFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const TimeoutBase = Data.TaggedError("Timeout")<SanitizedErrorFields>;
+export class Timeout extends TimeoutBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const AbortBase = Data.TaggedError("Abort")<SanitizedErrorFields>;
+export class Abort extends AbortBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const NetworkFailureBase = Data.TaggedError("NetworkFailure")<SanitizedErrorFields>;
+export class NetworkFailure extends NetworkFailureBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+type HttpStatusFailureFields = SanitizedErrorFields & { readonly statusClass: HttpStatusClass };
+const HttpStatusFailureBase = Data.TaggedError("HttpStatusFailure")<HttpStatusFailureFields>;
+export class HttpStatusFailure extends HttpStatusFailureBase {
+  constructor(fields: HttpStatusFailureFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const ProviderUnavailableBase = Data.TaggedError("ProviderUnavailable")<SanitizedErrorFields>;
+export class ProviderUnavailable extends ProviderUnavailableBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const ValidationDriftBase = Data.TaggedError("ValidationDrift")<ValidationDriftFields>;
+export class ValidationDrift extends ValidationDriftBase {
+  constructor(fields: ValidationDriftFields) {
+    super(sanitizeTaggedResponseDiagnostic(fields));
+  }
+}
+const UnsupportedCapabilityBase = Data.TaggedError("UnsupportedCapability")<SanitizedErrorFields>;
+export class UnsupportedCapability extends UnsupportedCapabilityBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const NoDataYetBase = Data.TaggedError("NoDataYet")<SanitizedErrorFields>;
+export class NoDataYet extends NoDataYetBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const StaleCachedValueBase = Data.TaggedError("StaleCachedValue")<SanitizedErrorFields>;
+export class StaleCachedValue extends StaleCachedValueBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const NotImplementedBase = Data.TaggedError("NotImplemented")<SanitizedErrorFields>;
+export class NotImplemented extends NotImplementedBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const ProbeRequiredBase = Data.TaggedError("ProbeRequired")<SanitizedErrorFields>;
+export class ProbeRequired extends ProbeRequiredBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const SettingsValidationFailureBase = Data.TaggedError("SettingsValidationFailure")<SanitizedErrorFields>;
+export class SettingsValidationFailure extends SettingsValidationFailureBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
+const UnknownSanitizedBase = Data.TaggedError("UnknownSanitized")<SanitizedErrorFields>;
+export class UnknownSanitized extends UnknownSanitizedBase {
+  constructor(fields: SanitizedErrorFields) {
+    super(stripUnsafeResponseDiagnostic(fields));
+  }
+}
 
 /** Union of every internal tagged error; the channel `Effect.catchTags` handles. */
 export type SanitizedTaggedError =
@@ -448,12 +733,47 @@ export function taggedFailureToSanitizedFailure(error: SanitizedTaggedError): Sa
       ...(error.fieldPaths === undefined ? {} : { fieldPaths: error.fieldPaths }),
       ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
       ...(error._tag === "HttpStatusFailure" ? { httpStatusClass: error.statusClass } : {}),
+      ...(error._tag === "ValidationDrift" && error.responseDiagnostic !== undefined
+        ? {
+            responseDiagnostic: {
+              code: error.responseDiagnostic.code,
+              ...(error.responseDiagnostic.receivedType === undefined
+                ? {}
+                : { receivedType: error.responseDiagnostic.receivedType }),
+            },
+          }
+        : {}),
     },
     ...(error.providerFailureClass === undefined
       ? {}
       : { provider: { failureClass: error.providerFailureClass, reasonCode: error.reasonCode } }),
     ...(error.internalCause === undefined ? {} : { cause: error.internalCause }),
   });
+}
+
+function stripUnsafeResponseDiagnostic<Fields extends SanitizedErrorFields>(fields: Fields): Fields {
+  if (!hasOwn(fields, "responseDiagnostic")) {
+    return fields;
+  }
+
+  const { responseDiagnostic: _raw, ...rest } = fields as Fields & { readonly responseDiagnostic?: unknown };
+  return rest as Fields;
+}
+
+function sanitizeTaggedResponseDiagnostic(fields: ValidationDriftFields): ValidationDriftFields {
+  if (!hasOwn(fields, "responseDiagnostic")) {
+    return fields;
+  }
+
+  const responseDiagnostic = normalizeResponseDiagnostic(fields.responseDiagnostic);
+  const { fieldPaths: _fieldPaths, internalCause: _internalCause, reasonCode: _reasonCode, responseDiagnostic: _raw, ...rest } =
+    fields;
+
+  return {
+    ...rest,
+    reasonCode: responseDiagnostic?.code ?? "unknown",
+    ...(responseDiagnostic === undefined ? {} : { responseDiagnostic }),
+  };
 }
 
 const failWithSanitizedFailure = (error: SanitizedTaggedError): Effect.Effect<never, SanitizedFailure> =>
