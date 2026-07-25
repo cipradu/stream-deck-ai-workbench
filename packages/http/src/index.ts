@@ -412,6 +412,7 @@ function statusTaggedError(
         return new RateLimited({
           reasonCode: "provider-http-status",
           providerFailureClass: "http-status",
+          httpStatus: status,
           ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
         });
       }),
@@ -421,7 +422,11 @@ function statusTaggedError(
 }
 
 function nonRateLimitStatusError(status: number): SanitizedTaggedError {
-  const shared = { reasonCode: "provider-http-status", providerFailureClass: "http-status" as const };
+  const shared = {
+    reasonCode: "provider-http-status",
+    providerFailureClass: "http-status" as const,
+    httpStatus: status,
+  };
   if (status === 401) {
     return new UnauthorizedExpired(shared);
   }

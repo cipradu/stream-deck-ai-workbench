@@ -73,9 +73,9 @@ export const ERROR_CATEGORY_RETRY_CLASS = {
 export const ERROR_CATEGORY_PUBLIC_MESSAGES = {
   "missing-credentials": "Provider credentials are missing.",
   "invalid-credentials": "Provider credentials are invalid.",
-  "insufficient-credential-scope": "Provider credentials do not have the required scope.",
-  "unauthorized-expired": "Provider authorization expired or was rejected.",
-  "rate-limited": "Provider rate limit is active.",
+  "insufficient-credential-scope": "Provider credentials lack the required access or scope. Check access or scope.",
+  "unauthorized-expired": "Provider authorization expired or was rejected. Reauthorize or update credentials.",
+  "rate-limited": "Provider rate limit is active. Retry follows the current policy.",
   timeout: "Provider request timed out.",
   abort: "Provider request was aborted.",
   "network-failure": "Provider network request failed.",
@@ -272,6 +272,7 @@ export interface SanitizedFailureDiagnostics {
   readonly reasonCode: string;
   readonly boundary?: string;
   readonly fieldPaths?: readonly string[];
+  readonly httpStatus?: number;
   readonly httpStatusClass?: HttpStatusClass;
   readonly issueCount?: number;
   readonly responseDiagnostic?: SanitizedResponseDiagnostic;
@@ -455,14 +456,16 @@ function sanitizeDiagnostics(input: SanitizedFailureDiagnosticsInput): Sanitized
   const responseDiagnosticProvided = hasOwn(input, "responseDiagnostic");
   const responseDiagnostic = normalizeResponseDiagnostic(input.responseDiagnostic);
   const fieldPaths = responseDiagnosticProvided ? [] : sanitizeFieldPaths(input.fieldPaths);
-  const httpStatusClass =
-    input.httpStatusClass ?? (input.httpStatus === undefined ? undefined : httpStatusClassOf(input.httpStatus));
+  const httpStatus = safeHttpStatus(input.httpStatus);
+  const explicitHttpStatusClass = isHttpStatusClass(input.httpStatusClass) ? input.httpStatusClass : undefined;
+  const httpStatusClass = httpStatus === undefined ? explicitHttpStatusClass : httpStatusClassOf(httpStatus);
   const issueCount = input.issueCount === undefined ? undefined : Math.max(0, Math.trunc(input.issueCount));
 
   return {
     reasonCode: responseDiagnostic?.code ?? (responseDiagnosticProvided ? "unknown" : sanitizeReasonCode(input.reasonCode, "unknown")),
     ...(input.boundary === undefined ? {} : { boundary: sanitizeReasonCode(input.boundary, "boundary") }),
     ...(fieldPaths.length === 0 ? {} : { fieldPaths }),
+    ...(httpStatus === undefined ? {} : { httpStatus }),
     ...(httpStatusClass === undefined ? {} : { httpStatusClass }),
     ...(issueCount === undefined ? {} : { issueCount }),
     ...(responseDiagnostic === undefined ? {} : { responseDiagnostic }),
@@ -488,6 +491,14 @@ function hasOwn(input: object, key: string): boolean {
 
 function isResponseDiagnosticReceivedType(input: unknown): input is ResponseDiagnosticReceivedType {
   return typeof input === "string" && (RESPONSE_DIAGNOSTIC_RECEIVED_TYPES as readonly string[]).includes(input);
+}
+
+function isHttpStatusClass(input: unknown): input is HttpStatusClass {
+  return typeof input === "string" && (HTTP_STATUS_CLASSES as readonly string[]).includes(input);
+}
+
+function safeHttpStatus(input: unknown): number | undefined {
+  return typeof input === "number" && Number.isInteger(input) && input >= 100 && input <= 599 ? input : undefined;
 }
 
 function sanitizeFieldPaths(paths: readonly string[] | undefined): readonly string[] {
@@ -547,6 +558,7 @@ export interface SanitizedErrorFields {
   readonly reasonCode: string;
   readonly boundary?: string;
   readonly fieldPaths?: readonly string[];
+  readonly httpStatus?: number;
   readonly issueCount?: number;
   readonly providerFailureClass?: ProviderFailureClass;
   readonly internalCause?: unknown;
@@ -720,9 +732,9 @@ export const TAGGED_ERROR_CATEGORY = {
  * `createSanitizedFailure`, so the plain output shape is identical to every other
  * producer. `internalCause` is handed to the module-private cause registry (never
  * serialized onto the plain contract); `retryAfterSeconds` has no slot on the
- * plain contract and stays on the internal channel for the scheduler; `statusClass`
- * is surfaced as the sanitized `httpStatusClass` diagnostic. Raw `Cause` never
- * crosses here.
+ * plain contract and stays on the internal channel for the scheduler; exact safe
+ * `httpStatus` and `statusClass` are surfaced as compatible diagnostics. Raw
+ * `Cause` never crosses here.
  */
 export function taggedFailureToSanitizedFailure(error: SanitizedTaggedError): SanitizedFailure {
   return createSanitizedFailure({
@@ -731,6 +743,7 @@ export function taggedFailureToSanitizedFailure(error: SanitizedTaggedError): Sa
       reasonCode: error.reasonCode,
       ...(error.boundary === undefined ? {} : { boundary: error.boundary }),
       ...(error.fieldPaths === undefined ? {} : { fieldPaths: error.fieldPaths }),
+      ...(error.httpStatus === undefined ? {} : { httpStatus: error.httpStatus }),
       ...(error.issueCount === undefined ? {} : { issueCount: error.issueCount }),
       ...(error._tag === "HttpStatusFailure" ? { httpStatusClass: error.statusClass } : {}),
       ...(error._tag === "ValidationDrift" && error.responseDiagnostic !== undefined

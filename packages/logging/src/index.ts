@@ -2,10 +2,12 @@ import { HashMap, Logger, Redacted, type Layer, type LogLevel as EffectLogLevel 
 
 import {
   ACTION_FAMILY_IDS,
+  ERROR_CATEGORIES,
   IMPLEMENTATION_STATUSES,
   PROVIDER_IDS,
   RETRY_CLASSES,
   type ActionFamilyId,
+  type ErrorCategory,
   type ImplementationStatus,
   type ProviderId,
   type RetryClass,
@@ -35,7 +37,9 @@ export interface SanitizedLogContext {
   readonly providerId?: ProviderId;
   readonly actionFamilyId?: ActionFamilyId;
   readonly implementationStatus?: ImplementationStatus;
+  readonly errorCategory?: ErrorCategory;
   readonly reasonCode?: string;
+  readonly httpStatus?: number;
   readonly httpStatusClass?: LogHttpStatusClass;
   readonly retryClass?: RetryClass;
   readonly elapsedMs?: number;
@@ -116,17 +120,19 @@ export function sanitizeLogContext(input: Readonly<Record<string, unknown>> = {}
   const providerId = stringInSet(input.providerId, PROVIDER_IDS);
   const actionFamilyId = stringInSet(input.actionFamilyId, ACTION_FAMILY_IDS);
   const implementationStatus = stringInSet(input.implementationStatus, IMPLEMENTATION_STATUSES);
+  const errorCategory = stringInSet(input.errorCategory, ERROR_CATEGORIES);
   const retryClass = stringInSet(input.retryClass, RETRY_CLASSES);
   const reasonCode =
     typeof input.reasonCode === "string" ? sanitizeCode(input.reasonCode, "unknown-reason") : undefined;
   // Accepts a raw numeric status (classified here) or an already sanitized
   // status class string from the central error diagnostics.
+  const httpStatus = safeHttpStatus(input.httpStatus);
   const httpStatusClass =
-    typeof input.httpStatus === "number"
-      ? httpStatusClassOf(input.httpStatus)
-      : typeof input.httpStatusClass === "string" && /^(?:[1-5]xx|unknown)$/.test(input.httpStatusClass)
+    httpStatus === undefined
+      ? typeof input.httpStatusClass === "string" && /^(?:[1-5]xx|unknown)$/.test(input.httpStatusClass)
         ? (input.httpStatusClass as LogHttpStatusClass)
-        : undefined;
+        : undefined
+      : httpStatusClassOf(httpStatus);
   const elapsedMs =
     typeof input.elapsedMs === "number" && Number.isFinite(input.elapsedMs) && input.elapsedMs >= 0
       ? Math.round(input.elapsedMs)
@@ -140,7 +146,9 @@ export function sanitizeLogContext(input: Readonly<Record<string, unknown>> = {}
     ...(providerId === undefined ? {} : { providerId }),
     ...(actionFamilyId === undefined ? {} : { actionFamilyId }),
     ...(implementationStatus === undefined ? {} : { implementationStatus }),
+    ...(errorCategory === undefined ? {} : { errorCategory }),
     ...(reasonCode === undefined ? {} : { reasonCode }),
+    ...(httpStatus === undefined ? {} : { httpStatus }),
     ...(httpStatusClass === undefined ? {} : { httpStatusClass }),
     ...(retryClass === undefined ? {} : { retryClass }),
     ...(elapsedMs === undefined ? {} : { elapsedMs }),
@@ -177,6 +185,10 @@ function httpStatusClassOf(status: number): LogHttpStatusClass {
   }
 
   return `${Math.trunc(status / 100)}xx` as LogHttpStatusClass;
+}
+
+function safeHttpStatus(input: unknown): number | undefined {
+  return typeof input === "number" && Number.isInteger(input) && input >= 100 && input <= 599 ? input : undefined;
 }
 
 function sanitizeCorrelationId(value: string): string | undefined {

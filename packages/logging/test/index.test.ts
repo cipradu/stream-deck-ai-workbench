@@ -73,13 +73,14 @@ describe("@ai-workbench/logging redaction primitives", () => {
 });
 
 describe("@ai-workbench/logging context allow-list", () => {
-  it("keeps only safe structured fields and derives status class instead of raw status", () => {
+  it("keeps only safe structured fields and preserves exact safe status with its class", () => {
     const context = sanitizeLogContext({
       actionFamilyId: "balance",
       accountId: RAW_NEEDLES.account,
       authorization: RAW_NEEDLES.token,
       correlationId: RAW_NEEDLES.sensitiveCorrelation,
       elapsedMs: 127.8,
+      errorCategory: "rate-limited",
       httpStatus: 429,
       implementationStatus: "docsOnly",
       providerFinancialValue: RAW_NEEDLES.money,
@@ -93,6 +94,8 @@ describe("@ai-workbench/logging context allow-list", () => {
     expect(context).toEqual({
       actionFamilyId: "balance",
       elapsedMs: 128,
+      errorCategory: "rate-limited",
+      httpStatus: 429,
       httpStatusClass: "4xx",
       implementationStatus: "docsOnly",
       providerId: "openai-api",
@@ -158,6 +161,7 @@ describe("@ai-workbench/logging sanitized event contract", () => {
 
     expect(event.context).toEqual({
       actionFamilyId: "balance",
+      httpStatus: 200,
       httpStatusClass: "2xx",
       providerId: "openai-api",
       reasonCode: "redacted",
@@ -191,6 +195,7 @@ describe("@ai-workbench/logging sanitized event contract", () => {
 
     expect(event.context).toEqual({
       actionFamilyId: "balance",
+      httpStatus: 200,
       httpStatusClass: "2xx",
       providerId: "openai-api",
       reasonCode: "redacted",
@@ -214,6 +219,7 @@ describe("@ai-workbench/logging sanitized event contract", () => {
       context: {
         actionFamilyId: "balance",
         correlationId: "refresh:balance:openai-api",
+        errorCategory: "provider-unavailable",
         httpStatus: 503,
         implementationStatus: "docsOnly",
         providerId: "openai-api",
@@ -230,6 +236,8 @@ describe("@ai-workbench/logging sanitized event contract", () => {
       context: {
         actionFamilyId: "balance",
         correlationId: "refresh:balance:openai-api",
+        errorCategory: "provider-unavailable",
+        httpStatus: 503,
         httpStatusClass: "5xx",
         implementationStatus: "docsOnly",
         providerId: "openai-api",
@@ -278,6 +286,17 @@ describe("@ai-workbench/logging sanitized event contract", () => {
     expect(sanitizeLogContext({ httpStatusClass: "6xx" })).toEqual({});
   });
 
+  it("rejects invalid exact status and unregistered error categories", () => {
+    for (const httpStatus of [99, 600, Number.NaN, "429"] as const) {
+      expect(
+        sanitizeLogContext({
+          errorCategory: "unregistered-category",
+          httpStatus: httpStatus as never,
+        }),
+      ).toEqual({});
+    }
+  });
+
 });
 
 describe("@ai-workbench/logging Effect Logger sink", () => {
@@ -321,6 +340,7 @@ describe("@ai-workbench/logging Effect Logger sink", () => {
         context: {
           actionFamilyId: "balance",
           elapsedMs: 43,
+          httpStatus: 200,
           httpStatusClass: "2xx",
           providerId: "openai-api",
           retryClass: "healthy-poll",

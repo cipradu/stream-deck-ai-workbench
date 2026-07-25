@@ -116,7 +116,7 @@ function usageBody(input: DisplayRendererInput, now: number): string {
       : resetLine;
 
   return [
-    staleBadge(input, now),
+    staleTopRow(input, now),
     `<text data-part="key-value" x="72" y="76" text-anchor="middle" font-family="sans-serif" font-size="40" font-weight="bold" fill="${keyColors.text}">${escapeXml(input.valueText)}</text>`,
     `<text data-part="value-context" x="72" y="93" text-anchor="middle" font-family="sans-serif" font-size="13" fill="${keyColors.dim}">${escapeXml(modeLabel)}</text>`,
     `<rect x="${GAUGE_X}" y="101" width="${GAUGE_TRACK_WIDTH}" height="10" rx="5" fill="${keyColors.track}"/>`,
@@ -165,7 +165,7 @@ function balanceBody(input: DisplayRendererInput, now: number): string {
       ? ""
       : `<text data-part="last-checked" x="72" y="43" text-anchor="middle" font-family="sans-serif" font-size="12" fill="${keyColors.dim}">&#10003; ${formatClockTime(input.fetchedAtEpochMs)}</text>`;
 
-  return staleBadge(input, now) + amount + unitRow + marker + checked;
+  return staleTopRow(input, now) + amount + unitRow + marker + checked;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +250,17 @@ function centeredMessage(lines: readonly string[], color: string): string {
 
 function severityColorFor(input: DisplayRendererInput): string {
   return keyColors[input.rendererSeverityState];
+}
+
+function staleTopRow(input: DisplayRendererInput, now: number): string {
+  return failureIndicator(input) + staleBadge(input, now);
+}
+
+function failureIndicator(input: DisplayRendererInput): string {
+  if (input.failureIndicator === undefined) {
+    return "";
+  }
+  return `<text data-part="failure-indicator" x="6" y="42" text-anchor="start" font-family="sans-serif" font-size="9" font-weight="bold" fill="${keyColors.warning}">${escapeXml(input.failureIndicator)}</text>`;
 }
 
 function staleBadge(input: DisplayRendererInput, now: number): string {

@@ -25,6 +25,29 @@ export const packageName = "@ai-workbench/display" as const;
 
 export type RendererSeverityState = "normal" | "warning" | "critical";
 
+const STALE_FAILURE_INDICATOR_LABEL_BY_CATEGORY = {
+  "missing-credentials": "AUTH REQUIRED",
+  "invalid-credentials": "AUTH REQUIRED",
+  "insufficient-credential-scope": "ACCESS DENIED",
+  "unauthorized-expired": "AUTH REQUIRED",
+  "rate-limited": "RATE LIMITED",
+  timeout: "TIMEOUT",
+  abort: "REFRESH STOPPED",
+  "network-failure": "NETWORK ERROR",
+  "http-status-failure": "HTTP ERROR",
+  "provider-unavailable": "UNAVAILABLE",
+  "validation-drift": "DATA ERROR",
+  "unsupported-capability": "UNSUPPORTED",
+  "no-data-yet": "NO DATA",
+  "stale-cached-value": undefined,
+  "not-implemented": "NOT AVAILABLE",
+  "probe-required": "SETUP REQUIRED",
+  "settings-validation-failure": "CHECK SETTINGS",
+  "unknown-sanitized-failure": "REFRESH ERROR",
+} as const satisfies Readonly<Record<ErrorCategory, string | undefined>>;
+
+export type StaleFailureIndicatorLabel = NonNullable<(typeof STALE_FAILURE_INDICATOR_LABEL_BY_CATEGORY)[ErrorCategory]>;
+
 export const RENDERER_SEVERITY_STATE_BY_SEVERITY = {
   healthy: "normal",
   "not-evaluated": "normal",
@@ -166,6 +189,8 @@ export interface DisplayRendererInput extends RendererInput {
   readonly statusTone?: SpendStatusTone;
   readonly staleReason?: SchedulerStaleReason;
   readonly failureContext?: DisplayFailureContext;
+  /** Static display-owned label for a retained failed-refresh stale key. */
+  readonly failureIndicator?: StaleFailureIndicatorLabel;
   /** Epoch ms the rendered snapshot was fetched; drives the stale-age badge and last-checked time. */
   readonly fetchedAtEpochMs?: number;
   /** Epoch ms of the next window/period reset when the vendor reports one; drives the countdown line. */
@@ -441,6 +466,8 @@ export function buildRendererInput(input: BuildRendererInputOptions): DisplayRen
   });
   const failureContext = failureContextFromSchedulerOutput(input.schedulerOutput);
   const isStale = input.schedulerOutput.displayState === "stale";
+  const failureIndicator =
+    isStale && input.schedulerOutput.staleReason === "refresh-failed" ? staleFailureIndicatorFromContext(failureContext) : undefined;
   const authExpiredHint = input.authExpiredHint ?? capability?.presentation?.authExpiredHint;
 
   return {
@@ -463,6 +490,7 @@ export function buildRendererInput(input: BuildRendererInputOptions): DisplayRen
     ...(value.statusTone === undefined ? {} : { statusTone: value.statusTone }),
     ...(input.schedulerOutput.staleReason === undefined ? {} : { staleReason: input.schedulerOutput.staleReason }),
     ...(failureContext === undefined ? {} : { failureContext }),
+    ...(failureIndicator === undefined ? {} : { failureIndicator }),
     fetchedAtEpochMs: snapshot.fetchedAtEpochMs,
     ...(snapshot.resetsAtEpochMs === undefined ? {} : { resetsAtEpochMs: snapshot.resetsAtEpochMs }),
     ...(snapshot.dataThroughEpochMs === undefined ? {} : { dataThroughEpochMs: snapshot.dataThroughEpochMs }),
@@ -937,4 +965,11 @@ function failureContextFromSchedulerOutput(schedulerOutput: SchedulerOutput): Di
           providerReasonCode: failure.provider.reasonCode,
         }),
   };
+}
+
+function staleFailureIndicatorFromContext(context: DisplayFailureContext | undefined): StaleFailureIndicatorLabel | undefined {
+  if (context === undefined) {
+    return undefined;
+  }
+  return STALE_FAILURE_INDICATOR_LABEL_BY_CATEGORY[context.category];
 }

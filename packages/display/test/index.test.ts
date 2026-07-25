@@ -1,7 +1,15 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import type { DisplayState, NormalizedSnapshot, ProviderId, SeverityThresholdSet } from "../../contracts/src/index.js";
+import {
+  ERROR_CATEGORIES,
+  type DisplayState,
+  type ErrorCategory,
+  type NormalizedSnapshot,
+  type ProviderId,
+  type RetryClass,
+  type SeverityThresholdSet,
+} from "../../contracts/src/index.js";
 import { findProviderEntry, type ProviderCapabilityMetadata } from "../../provider-registry/src/index.js";
 import { describe, expect, it } from "vitest";
 
@@ -19,6 +27,29 @@ interface RegistryCapabilityFixture {
   readonly providerId: ProviderId;
   readonly capability: ProviderCapabilityMetadata;
 }
+
+type StaleFailureIndicatorCase = readonly [ErrorCategory, DisplayState, RetryClass, string | undefined];
+
+const STALE_FAILURE_INDICATOR_CASES = [
+  ["missing-credentials", "missing-credentials", "credential-settings-refresh", "AUTH REQUIRED"],
+  ["invalid-credentials", "invalid-credentials", "credential-settings-refresh", "AUTH REQUIRED"],
+  ["insufficient-credential-scope", "invalid-credentials", "credential-settings-refresh", "ACCESS DENIED"],
+  ["unauthorized-expired", "unauthorized-expired", "credential-settings-refresh", "AUTH REQUIRED"],
+  ["rate-limited", "rate-limited", "rate-limit-backoff", "RATE LIMITED"],
+  ["timeout", "timeout", "transient-retry", "TIMEOUT"],
+  ["abort", "provider-unavailable", "transient-retry", "REFRESH STOPPED"],
+  ["network-failure", "network-failure", "transient-retry", "NETWORK ERROR"],
+  ["http-status-failure", "provider-unavailable", "transient-retry", "HTTP ERROR"],
+  ["provider-unavailable", "provider-unavailable", "transient-retry", "UNAVAILABLE"],
+  ["validation-drift", "validation-drift", "rate-limit-backoff", "DATA ERROR"],
+  ["unsupported-capability", "unsupported-capability", "no-retry", "UNSUPPORTED"],
+  ["no-data-yet", "no-data-yet", "healthy-poll", "NO DATA"],
+  ["stale-cached-value", "stale", "healthy-poll", undefined],
+  ["not-implemented", "not-implemented", "no-retry", "NOT AVAILABLE"],
+  ["probe-required", "not-implemented", "probe-gated", "SETUP REQUIRED"],
+  ["settings-validation-failure", "settings-invalid", "credential-settings-refresh", "CHECK SETTINGS"],
+  ["unknown-sanitized-failure", "unknown-sanitized-failure", "transient-retry", "REFRESH ERROR"],
+] as const satisfies readonly StaleFailureIndicatorCase[];
 
 function registryCapability(providerId: ProviderId): RegistryCapabilityFixture {
   const entry = findProviderEntry(providerId);
@@ -53,15 +84,34 @@ function coverageFor(capability: ProviderCapabilityMetadata): NormalizedSnapshot
   return { kind: capability.coverageKind };
 }
 
-function failure(displayState: DisplayState = "validation-drift") {
+function staleFailureIndicatorCaseFor(category: ErrorCategory): StaleFailureIndicatorCase {
+  const match = STALE_FAILURE_INDICATOR_CASES.find(([candidate]) => candidate === category);
+  if (match === undefined) {
+    throw new Error(`Missing stale failure indicator test case for ${category}`);
+  }
+  return match;
+}
+
+function failure(
+  category: ErrorCategory = "validation-drift",
+  options: {
+    readonly boundary?: string;
+    readonly httpStatusClass?: "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "unknown";
+    readonly reasonCode?: string;
+    readonly safePublicMessage?: string;
+  } = {},
+) {
+  const [, displayState, retryClass] = staleFailureIndicatorCaseFor(category);
   return {
-    category: displayState === "no-data-yet" ? "no-data-yet" : "validation-drift",
+    category,
     displayState,
-    retryClass: displayState === "no-data-yet" ? "healthy-poll" : "rate-limit-backoff",
-    safePublicMessage: displayState === "no-data-yet" ? "No provider data is available yet." : "Provider response validation failed.",
+    retryClass,
+    safePublicMessage:
+      options.safePublicMessage ?? (category === "no-data-yet" ? "No provider data is available yet." : "Provider response validation failed."),
     diagnostics: {
-      boundary: "display-test",
-      reasonCode: displayState === "no-data-yet" ? "no-current-data" : "provider-schema-drift",
+      boundary: options.boundary ?? "display-test",
+      reasonCode: options.reasonCode ?? (category === "no-data-yet" ? "no-current-data" : "provider-schema-drift"),
+      ...(options.httpStatusClass === undefined ? {} : { httpStatusClass: options.httpStatusClass }),
     },
     sanitized: true,
   } as const;
@@ -492,6 +542,131 @@ describe("stale and degraded renderer-safe display inputs", () => {
         reasonCode: "provider-schema-drift",
       },
     });
+  });
+
+  it("derives the exact stale failure indicator catalog from retained failure categories", () => {
+    const fal = registryCapability("fal");
+
+    expect(STALE_FAILURE_INDICATOR_CASES.map(([category]) => category)).toEqual(ERROR_CATEGORIES);
+
+    for (const [category, _displayState, _retryClass, expectedIndicator] of STALE_FAILURE_INDICATOR_CASES) {
+      const input = buildRendererInput({
+        schedulerOutput: {
+          schedulerKey: `balance:fal:${category}`,
+          displayState: "stale",
+          refreshIntervalSeconds: 600,
+          activeRefCount: 1,
+          inFlight: false,
+          snapshot: snapshotFor(fal, { value: 4.99 }),
+          failure: failure(category),
+          staleReason: "refresh-failed",
+        },
+      });
+
+      expect(input.failureContext?.category).toBe(category);
+      expect(input.failureIndicator).toBe(expectedIndicator);
+    }
+  });
+
+  it.each([
+    ["unauthorized-expired", "AUTH REQUIRED"],
+    ["insufficient-credential-scope", "ACCESS DENIED"],
+    ["rate-limited", "RATE LIMITED"],
+  ] as const)("derives the retained HTTP stale indicator for %s from category only", (category, expectedIndicator) => {
+    const fal = registryCapability("fal");
+
+    const input = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: `balance:fal:${category}`,
+        displayState: "stale",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(fal, { value: 4.99 }),
+        failure: failure(category, {
+          httpStatusClass: "5xx",
+          reasonCode: "raw-server-says-rate-limited",
+          safePublicMessage: "ACCESS DENIED bearer raw-token account_123",
+        }),
+        staleReason: "refresh-failed",
+      },
+    });
+
+    expect(input.failureContext).toMatchObject({
+      category,
+      httpStatusClass: "5xx",
+      reasonCode: "raw-server-says-rate-limited",
+      safePublicMessage: "ACCESS DENIED bearer raw-token account_123",
+    });
+    expect(input.failureIndicator).toBe(expectedIndicator);
+    expect(input.failureIndicator).not.toBe(input.failureContext?.safePublicMessage);
+  });
+
+  it("does not invent stale failure indicators for fresh, age-only, local-fallback, stale-without-failure, or degraded states", () => {
+    const fal = registryCapability("fal");
+
+    const fresh = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal:fresh",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(fal, { value: 4.99 }),
+        failure: failure("unauthorized-expired"),
+      },
+    });
+    const ageOnly = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal:age-stale",
+        displayState: "stale",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(fal, { value: 4.99 }),
+        failure: failure("stale-cached-value"),
+        staleReason: "age-stale",
+      },
+    });
+    const staleWithoutFailure = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal:stale-without-failure",
+        displayState: "stale",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(fal, { value: 4.99 }),
+        staleReason: "age-stale",
+      },
+    });
+    const localFallback = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal:local-fallback",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: { ...snapshotFor(fal, { value: 4.99 }), source: "local-fallback" },
+      },
+    });
+    const degraded = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal:degraded",
+        displayState: "unauthorized-expired",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        failure: failure("unauthorized-expired"),
+      },
+    });
+
+    expect(fresh.failureIndicator).toBeUndefined();
+    expect(ageOnly.failureIndicator).toBeUndefined();
+    expect(staleWithoutFailure.failureIndicator).toBeUndefined();
+    expect(localFallback.sourceFallback).toBe(true);
+    expect(localFallback.failureIndicator).toBeUndefined();
+    expect(degraded.freshness).toBe("degraded");
+    expect(degraded.failureIndicator).toBeUndefined();
   });
 
   it("renders no-snapshot failures as degraded no-data without fabricating value or progress", () => {

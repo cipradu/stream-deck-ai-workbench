@@ -125,8 +125,10 @@ export function withFetchPathLogging(
         context: {
           actionFamilyId: settings.familyId,
           providerId: settings.providerId,
+          errorCategory: failure.category,
           reasonCode: failure.diagnostics.reasonCode,
           retryClass: failure.retryClass,
+          ...(failure.diagnostics.httpStatus === undefined ? {} : { httpStatus: failure.diagnostics.httpStatus }),
           ...(failure.diagnostics.httpStatusClass === undefined ? {} : { httpStatusClass: failure.diagnostics.httpStatusClass }),
           ...(failure.diagnostics.responseDiagnostic?.expectedType === undefined
             ? {}

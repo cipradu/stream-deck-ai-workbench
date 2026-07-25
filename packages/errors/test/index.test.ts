@@ -99,7 +99,15 @@ describe("@ai-workbench/errors category policy", () => {
     expect(ERROR_CATEGORY_DISPLAY_STATE["probe-required"]).toBe("not-implemented");
     expect(ERROR_CATEGORY_RETRY_CLASS["probe-required"]).toBe("probe-gated");
     expect(ERROR_CATEGORY_RETRY_CLASS["unknown-sanitized-failure"]).toBe("transient-retry");
-    expect(ERROR_CATEGORY_PUBLIC_MESSAGES["insufficient-credential-scope"]).toContain("scope");
+    expect(ERROR_CATEGORY_PUBLIC_MESSAGES["insufficient-credential-scope"]).toBe(
+      "Provider credentials lack the required access or scope. Check access or scope.",
+    );
+    expect(ERROR_CATEGORY_PUBLIC_MESSAGES["unauthorized-expired"]).toBe(
+      "Provider authorization expired or was rejected. Reauthorize or update credentials.",
+    );
+    expect(ERROR_CATEGORY_PUBLIC_MESSAGES["rate-limited"]).toBe(
+      "Provider rate limit is active. Retry follows the current policy.",
+    );
     expect(ERROR_CATEGORY_PUBLIC_MESSAGES["probe-required"]).toContain("probe");
   });
 });
@@ -157,11 +165,27 @@ describe("@ai-workbench/errors sanitized failures", () => {
     expect(failure.diagnostics).toEqual({
       boundary: "provider-response",
       fieldPaths: ["provider.token", "usage.amount"],
+      httpStatus: 503,
       httpStatusClass: "5xx",
       issueCount: 0,
       reasonCode: "raw-cause-pretty-output",
     });
     expect(JSON.stringify(failure)).not.toContain(RAW_NEEDLES.providerBody);
+  });
+
+  it("rejects invalid exact HTTP status diagnostics instead of preserving status metadata", () => {
+    for (const httpStatus of [99, 600, Number.NaN, "401"] as const) {
+      const failure = createSanitizedFailure({
+        category: "http-status-failure",
+        diagnostics: {
+          httpStatus: httpStatus as never,
+          reasonCode: "provider-http-status",
+        },
+      });
+
+      expect(failure.diagnostics).toEqual({ reasonCode: "provider-http-status" });
+      expect(JSON.stringify(failure)).not.toContain(String(httpStatus));
+    }
   });
 });
 
@@ -372,19 +396,21 @@ describe("@ai-workbench/errors response diagnostic catalog", () => {
 });
 
 describe("@ai-workbench/errors provider failure mapping", () => {
-  it("maps provider HTTP failures into shared categories without local UI messages", () => {
+  it("maps provider HTTP failures into shared categories with exact safe status and without local UI messages", () => {
     const expected: ReadonlyArray<{
       readonly status: number;
       readonly category: ErrorCategory;
+      readonly httpStatusClass: string;
     }> = [
-      { status: 401, category: "unauthorized-expired" },
-      { status: 403, category: "insufficient-credential-scope" },
-      { status: 429, category: "rate-limited" },
-      { status: 503, category: "provider-unavailable" },
-      { status: 418, category: "http-status-failure" },
+      { status: 401, category: "unauthorized-expired", httpStatusClass: "4xx" },
+      { status: 403, category: "insufficient-credential-scope", httpStatusClass: "4xx" },
+      { status: 408, category: "timeout", httpStatusClass: "4xx" },
+      { status: 429, category: "rate-limited", httpStatusClass: "4xx" },
+      { status: 503, category: "provider-unavailable", httpStatusClass: "5xx" },
+      { status: 418, category: "http-status-failure", httpStatusClass: "4xx" },
     ];
 
-    for (const { status, category } of expected) {
+    for (const { status, category, httpStatusClass } of expected) {
       const failure = mapProviderFailure({
         kind: "http-status",
         httpStatus: status,
@@ -396,6 +422,8 @@ describe("@ai-workbench/errors provider failure mapping", () => {
       expect(failure.category).toBe(category);
       expect(failure.displayState).toBe(ERROR_CATEGORY_DISPLAY_STATE[category]);
       expect(failure.retryClass).toBe(ERROR_CATEGORY_RETRY_CLASS[category]);
+      expect(failure.diagnostics.httpStatus).toBe(status);
+      expect(failure.diagnostics.httpStatusClass).toBe(httpStatusClass);
       expect(failure.provider).toEqual({
         failureClass: "http-status",
         reasonCode: "provider-http-status",
@@ -449,12 +477,13 @@ describe("@ai-workbench/errors tagged error channel", () => {
     }
   });
 
-  it("surfaces a sanitized HTTP status class in diagnostics", () => {
+  it("surfaces exact safe HTTP status and compatible class in diagnostics", () => {
     const failure = taggedFailureToSanitizedFailure(
-      new HttpStatusFailure({ reasonCode: "provider-http-status", statusClass: "5xx" }),
+      new HttpStatusFailure({ reasonCode: "provider-http-status", httpStatus: 503, statusClass: "5xx" }),
     );
 
     expect(failure.category).toBe("http-status-failure");
+    expect(failure.diagnostics.httpStatus).toBe(503);
     expect(failure.diagnostics.httpStatusClass).toBe("5xx");
   });
 

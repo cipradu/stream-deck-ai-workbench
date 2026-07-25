@@ -5,7 +5,13 @@ import { Duration, Effect, ManagedRuntime, Redacted, TestClock, TestContext } fr
 
 import { listBalanceProviderOptions } from "@ai-workbench/action-balance";
 import { listUsageProviderOptions } from "@ai-workbench/action-usage";
-import { PROVIDER_IDS, serializeSchedulerKey, type MetricDirection, type NormalizedSnapshot, type SchedulerKeyParts } from "@ai-workbench/contracts";
+import {
+  PROVIDER_IDS,
+  serializeSchedulerKey,
+  type MetricDirection,
+  type NormalizedSnapshot,
+  type SchedulerKeyParts,
+} from "@ai-workbench/contracts";
 import { evaluateSeverity, type DisplayRendererInput } from "@ai-workbench/display";
 import { createSanitizedFailure } from "@ai-workbench/errors";
 import type { SanitizedLogEvent, StreamDeckLogSink } from "@ai-workbench/logging";
@@ -414,6 +420,7 @@ describe("scheduler fetch-path logging", () => {
         context: {
           actionFamilyId: "usage",
           elapsedMs: 0,
+          errorCategory: "validation-drift",
           expectedResponseType: "number-or-null",
           providerId: "claude-code",
           reasonCode: "claude-code-usage-five-hour-utilization-invalid",
@@ -426,6 +433,94 @@ describe("scheduler fetch-path logging", () => {
         sanitized: true,
       },
     ]);
+  });
+
+  it("emits one actionable failed event with central category, exact status, retry metadata, and safe message", async () => {
+    const parsed = parseActionSettings(usageSettings);
+    if (!parsed.ok) {
+      throw new Error("Expected valid Claude Code usage test settings");
+    }
+
+    const logEvents: SanitizedLogEvent[] = [];
+    const loggedFetch = withFetchPathLogging(
+      parsed.value,
+      {
+        logSink: {
+          write: (event) => {
+            logEvents.push(event);
+          },
+        },
+        now: () => 100,
+        readGlobalSettings: async () => ({}),
+        sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
+      },
+      () =>
+        Effect.fail({
+          failure: createSanitizedFailure({
+            category: "rate-limited",
+            diagnostics: {
+              httpStatus: 429,
+              reasonCode: "provider-http-status",
+            },
+            cause: new Error(`${RAW_NEEDLES.token} raw response body fragment`),
+          }),
+        }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        loggedFetch({
+          key: parsed.value.schedulerKey,
+          keyParts: parsed.value.schedulerKeyParts,
+          schedulerKey: parsed.value.schedulerKey,
+          signal: new AbortController().signal,
+          startedAtEpochMs: 100,
+          trigger: "healthy-poll",
+        }),
+      ),
+    );
+
+    expect(outcome).toMatchObject({
+      _tag: "Left",
+      left: {
+        failure: {
+          category: "rate-limited",
+          diagnostics: {
+            httpStatus: 429,
+            httpStatusClass: "4xx",
+            reasonCode: "provider-http-status",
+          },
+          retryClass: "rate-limit-backoff",
+        },
+      },
+    });
+
+    expect(logEvents.map((event) => event.eventName)).toEqual([
+      "streamdeck-provider-fetch-started",
+      "streamdeck-provider-fetch-failed",
+    ]);
+    const failureEvents = logEvents.filter((event) => event.eventName === "streamdeck-provider-fetch-failed");
+    expect(failureEvents).toHaveLength(1);
+    expect(failureEvents).toEqual([
+      {
+        context: {
+          actionFamilyId: "usage",
+          elapsedMs: 0,
+          errorCategory: "rate-limited",
+          httpStatus: 429,
+          httpStatusClass: "4xx",
+          providerId: "claude-code",
+          reasonCode: "provider-http-status",
+          retryClass: "rate-limit-backoff",
+        },
+        eventName: "streamdeck-provider-fetch-failed",
+        level: "warn",
+        message: "Provider rate limit is active. Retry follows the current policy.",
+        sanitized: true,
+      },
+    ]);
+    expect(JSON.stringify(logEvents)).not.toContain(RAW_NEEDLES.token);
+    expect(JSON.stringify(logEvents)).not.toContain("raw response body fragment");
   });
 
   it("keeps successful Claude fetch logging on the existing context without response type labels", async () => {
@@ -557,6 +652,7 @@ describe("scheduler fetch-path logging", () => {
         context: {
           actionFamilyId: "usage",
           elapsedMs: 0,
+          errorCategory: "no-data-yet",
           providerId: "claude-code",
           reasonCode: "usage-claude-source-reader-missing",
           retryClass: "healthy-poll",
@@ -2056,8 +2152,165 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     expect(svgFor(freshNotEvaluated)).toContain('data-part="gauge-fill"');
     expect(svgFor(freshNotEvaluated)).toContain("#2ecc71");
     expect(svgFor(stale)).toContain('data-part="stale-badge"');
+    expect(svgFor(freshNotEvaluated)).not.toContain('data-part="failure-indicator"');
+    expect(svgFor(stale)).not.toContain('data-part="failure-indicator"');
     expect(svgFor(degraded)).toContain("settings");
     expect(svgFor(degraded)).toContain("invalid");
+    expect(svgFor(degraded)).not.toContain('data-part="failure-indicator"');
+  });
+
+  it("renders a display-owned stale failure indicator beside the stale badge without replacing the retained value", () => {
+    const retainedStale = {
+      displayState: "stale",
+      failureIndicator: "AUTH REQUIRED",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "stale",
+      headerLabel: "Fal",
+      rendererSeverityState: "critical",
+      severity: "critical",
+      stale: true,
+      staleReason: "refresh-failed",
+      valueLabel: "remaining",
+      valueText: "$42.00",
+    } as DisplayRendererInput;
+
+    const rendered = decodeURIComponent(renderDisplayInput(retainedStale, 1_700_000_000_000).image);
+
+    expect(rendered).toContain('data-part="failure-indicator"');
+    expect(rendered).toContain('x="6" y="42" text-anchor="start"');
+    expect(rendered).toContain(">AUTH REQUIRED</text>");
+    expect(rendered).toContain('data-part="stale-badge" x="138" y="42" text-anchor="end"');
+    expect(rendered).toContain('data-part="balance-value"');
+    expect(rendered).toContain("$42.00");
+  });
+
+  it("renders a display-owned stale failure indicator in the usage layout without replacing the retained value or gauge", () => {
+    const retainedUsage = {
+      displayState: "stale",
+      failureIndicator: "RATE LIMITED",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "stale",
+      headerLabel: "Claude Code · 5h",
+      progressPercent: 83,
+      rendererSeverityState: "warning",
+      severity: "warning",
+      stale: true,
+      staleReason: "refresh-failed",
+      valueLabel: "used",
+      valueText: "83%",
+    } as DisplayRendererInput;
+
+    const rendered = decodeURIComponent(renderDisplayInput(retainedUsage, 1_700_000_000_000).image);
+
+    expect(rendered).toContain('data-part="failure-indicator"');
+    expect(rendered).toContain(">RATE LIMITED</text>");
+    expect(rendered).toContain('data-part="stale-badge" x="138" y="42" text-anchor="end"');
+    expect(rendered).toContain('data-part="key-value"');
+    expect(rendered).toContain(">83%</text>");
+    expect(rendered).toContain('data-part="gauge-fill"');
+  });
+
+  it.each([
+    ["HTTP 401", "AUTH REQUIRED"],
+    ["HTTP 403", "ACCESS DENIED"],
+    ["HTTP 429", "RATE LIMITED"],
+  ] as const)("renders a display-supplied %s stale indicator with the finite catalog label", (_caseName, expectedIndicator) => {
+    const input = {
+      displayState: "stale",
+      failureIndicator: expectedIndicator,
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "stale",
+      headerLabel: "Fal",
+      rendererSeverityState: "critical",
+      severity: "critical",
+      stale: true,
+      staleReason: "refresh-failed",
+      valueLabel: "remaining",
+      valueText: "$42.00",
+    } as DisplayRendererInput;
+
+    const rendered = decodeURIComponent(renderDisplayInput(input, 1_700_000_000_000).image);
+
+    expect(rendered).toContain(`>${expectedIndicator}</text>`);
+    expect(rendered).toContain('data-part="failure-indicator"');
+    expect(rendered).toContain('data-part="stale-badge" x="138" y="42" text-anchor="end"');
+    expect(rendered).toContain('data-part="balance-value"');
+    expect(rendered).toContain("$42.00");
+  });
+
+  it("does not render raw failure context as stale indicator text", () => {
+    const retainedStale = {
+      displayState: "stale",
+      failureContext: {
+        boundary: "streamdeck-test-bearer-fixture-token-value",
+        category: "unauthorized-expired",
+        displayState: "unauthorized-expired",
+        httpStatusClass: "4xx",
+        providerFailureClass: "authorization",
+        providerReasonCode: "provider-account_014-secret-fixture",
+        reasonCode: "authorization-bearer-fixture-token-value",
+        retryClass: "credential-settings-refresh",
+        safePublicMessage: "server body had fixture-api-key-value and Bearer fixture-token-value for account_014-secret-fixture",
+      },
+      failureIndicator: "AUTH REQUIRED",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "stale",
+      headerLabel: "Fal",
+      rendererSeverityState: "critical",
+      severity: "critical",
+      stale: true,
+      staleReason: "refresh-failed",
+      valueLabel: "remaining",
+      valueText: "$42.00",
+    } as DisplayRendererInput;
+
+    const rendered = decodeURIComponent(renderDisplayInput(retainedStale, 1_700_000_000_000).image);
+
+    expect(rendered).toContain(">AUTH REQUIRED</text>");
+    expect(rendered).toContain("$42.00");
+    for (const needle of [RAW_NEEDLES.account, RAW_NEEDLES.apiKey, RAW_NEEDLES.token, "server body", "provider-account_014-secret-fixture"]) {
+      expect(rendered).not.toContain(needle);
+    }
+  });
+
+  it("keeps age-only stale, local-fallback, and no-snapshot degraded keys free of failure indicators", () => {
+    const ageOnly: DisplayRendererInput = {
+      displayState: "stale",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "stale",
+      headerLabel: "Fal",
+      rendererSeverityState: "critical",
+      severity: "critical",
+      stale: true,
+      staleReason: "age-stale",
+      valueLabel: "remaining",
+      valueText: "$42.00",
+    };
+    const localFallback: DisplayRendererInput = {
+      displayState: "fresh",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "fresh",
+      headerLabel: "Codex · 5h",
+      progressPercent: 61,
+      rendererSeverityState: "normal",
+      severity: "not-evaluated",
+      sourceFallback: true,
+      stale: false,
+      valueLabel: "used",
+      valueText: "61 used",
+    };
+    const degraded: DisplayRendererInput = {
+      displayState: "unauthorized-expired",
+      freshness: "degraded",
+      rendererSeverityState: "normal",
+      severity: "not-evaluated",
+      stale: false,
+      valueText: "Authorization expired",
+    };
+
+    expect(decodeURIComponent(renderDisplayInput(ageOnly, 1_700_000_000_000).image)).not.toContain('data-part="failure-indicator"');
+    expect(decodeURIComponent(renderDisplayInput(localFallback, 1_700_000_000_000).image)).not.toContain('data-part="failure-indicator"');
+    expect(decodeURIComponent(renderDisplayInput(degraded, 1_700_000_000_000).image)).not.toContain('data-part="failure-indicator"');
   });
 
   it("shows the stale badge and reset countdown together for a fresh local-fallback snapshot", () => {
@@ -2079,6 +2332,7 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     const rendered = decodeURIComponent(renderDisplayInput(fallbackFresh, 1_700_000_000_000).image);
     // Local-fallback honesty and restored reset countdown render together.
     expect(rendered).toContain('data-part="stale-badge"');
+    expect(rendered).not.toContain('data-part="failure-indicator"');
     expect(rendered).toContain('data-part="reset-line"');
     expect(rendered).toContain("50m");
     expect(rendered).toContain('data-part="gauge-fill"');

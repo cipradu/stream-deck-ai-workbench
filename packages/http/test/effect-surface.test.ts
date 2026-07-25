@@ -362,16 +362,26 @@ describe("@ai-workbench/http Effect-native surface", () => {
   });
 
   it.each([
-    [401, "UnauthorizedExpired"],
-    [403, "InsufficientCredentialScope"],
-    [408, "Timeout"],
-    [418, "HttpStatusFailure"],
-    [500, "ProviderUnavailable"],
-    [504, "Timeout"],
-  ] as const)("classifies HTTP %i as the %s tagged error", async (status, tag) => {
+    [401, "UnauthorizedExpired", "unauthorized-expired", "credential-settings-refresh", "4xx"],
+    [403, "InsufficientCredentialScope", "insufficient-credential-scope", "credential-settings-refresh", "4xx"],
+    [408, "Timeout", "timeout", "transient-retry", "4xx"],
+    [418, "HttpStatusFailure", "http-status-failure", "transient-retry", "4xx"],
+    [500, "ProviderUnavailable", "provider-unavailable", "transient-retry", "5xx"],
+    [504, "Timeout", "timeout", "transient-retry", "5xx"],
+  ] as const)("classifies HTTP %i as the %s tagged error with exact safe status", async (status, tag, category, retryClass, httpStatusClass) => {
     const exit = await runSurface(executeRequest(buildHttpRequest(baseRequest)), respond(status, RAW_NEEDLES.responseBody));
     const tagged = taggedFailure(exit);
     expect(tagged._tag).toBe(tag);
+    expect(tagged).toMatchObject({ httpStatus: status });
+    expect(taggedFailureToSanitizedFailure(tagged)).toMatchObject({
+      category,
+      diagnostics: {
+        httpStatus: status,
+        httpStatusClass,
+        reasonCode: "provider-http-status",
+      },
+      retryClass,
+    });
     const serialized = JSON.stringify(tagged);
     expect(serialized).not.toContain(RAW_NEEDLES.responseBody);
     expect(serialized).not.toContain("fake-token");
@@ -384,6 +394,16 @@ describe("@ai-workbench/http Effect-native surface", () => {
     );
     const tagged = taggedFailure(exit);
     expect(tagged._tag).toBe("RateLimited");
+    expect(tagged).toMatchObject({ httpStatus: 429 });
+    expect(taggedFailureToSanitizedFailure(tagged)).toMatchObject({
+      category: "rate-limited",
+      diagnostics: {
+        httpStatus: 429,
+        httpStatusClass: "4xx",
+        reasonCode: "provider-http-status",
+      },
+      retryClass: "rate-limit-backoff",
+    });
     if (tagged._tag === "RateLimited") {
       expect(tagged.retryAfterSeconds).toBe(30);
     }
@@ -411,6 +431,7 @@ describe("@ai-workbench/http Effect-native surface", () => {
     );
     const tagged = taggedFailure(exit);
     expect(tagged._tag).toBe("RateLimited");
+    expect(tagged).toMatchObject({ httpStatus: 429 });
     if (tagged._tag === "RateLimited") {
       expect(tagged.retryAfterSeconds).toBe(expectedSeconds);
     }
@@ -552,6 +573,7 @@ describe("@ai-workbench/http requestTextBody", () => {
       const exit = await runSurface(requestTextBody(baseRequest), respond(status, RAW_NEEDLES.responseBody));
       const tagged = taggedFailure(exit);
       expect(tagged._tag).toBe(tag);
+      expect(tagged).toMatchObject({ httpStatus: status });
       const serialized = JSON.stringify(tagged);
       expect(serialized).not.toContain(RAW_NEEDLES.responseBody);
       expect(serialized).not.toContain("fake-token");
