@@ -37,8 +37,8 @@ describe("action families", () => {
 
 describe("provider identifiers", () => {
   it("contains exactly the four usage provider ids", () => {
-    expect(asSortedSet(USAGE_PROVIDER_IDS)).toEqual(["claude-code", "codex", "minimax", "zai-coding-plan"]);
-    expect(USAGE_PROVIDER_IDS).toHaveLength(4);
+    expect(asSortedSet(USAGE_PROVIDER_IDS)).toEqual(["claude-code", "codex", "kimi-code", "minimax", "zai-coding-plan"]);
+    expect(USAGE_PROVIDER_IDS).toHaveLength(5);
   });
 
   it("contains exactly the twelve balance provider ids", () => {
@@ -59,10 +59,10 @@ describe("provider identifiers", () => {
     expect(BALANCE_PROVIDER_IDS).toHaveLength(12);
   });
 
-  it("exposes all sixteen first-catalog providers with no duplicates", () => {
+  it("exposes all seventeen catalog providers with no duplicates", () => {
     expect(asSortedSet(PROVIDER_IDS)).toEqual(asSortedSet([...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS]));
-    expect(PROVIDER_IDS).toHaveLength(16);
-    expect(new Set(PROVIDER_IDS).size).toBe(16);
+    expect(PROVIDER_IDS).toHaveLength(17);
+    expect(new Set(PROVIDER_IDS).size).toBe(17);
   });
 });
 
@@ -120,7 +120,16 @@ describe("metric model", () => {
   });
 
   it("contains exactly the usage windows and coverage kinds", () => {
-    expect(asSortedSet(USAGE_WINDOW_IDS)).toEqual(["credit-spend", "credits", "fable", "five-hour", "monthly-mcp", "resets", "seven-day"]);
+    expect(asSortedSet(USAGE_WINDOW_IDS)).toEqual([
+      "credit-spend",
+      "credits",
+      "extra-usage",
+      "fable",
+      "five-hour",
+      "monthly-mcp",
+      "resets",
+      "seven-day",
+    ]);
     expect(asSortedSet(COVERAGE_KINDS)).toEqual(["current-period", "evergreen", "month-to-date", "rolling-window"]);
   });
 });

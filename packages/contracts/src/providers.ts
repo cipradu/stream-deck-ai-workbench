@@ -4,7 +4,7 @@
  * registry, never to these ids.
  */
 
-export const USAGE_PROVIDER_IDS = ["claude-code", "codex", "zai-coding-plan", "minimax"] as const;
+export const USAGE_PROVIDER_IDS = ["claude-code", "codex", "kimi-code", "zai-coding-plan", "minimax"] as const;
 export type UsageProviderId = (typeof USAGE_PROVIDER_IDS)[number];
 
 // Declared in the old working plugin's Balance picker order; the registry and

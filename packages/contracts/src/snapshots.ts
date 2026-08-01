@@ -88,17 +88,7 @@ export interface UsageResetsSnapshot extends NormalizedSnapshotBase {
   readonly coverage: EvergreenCoverage;
 }
 
-/**
- * Extra-usage SPEND snapshot in the ACTIVE state (Claude Code "Credits" category). Upper-bound
- * `usage-spend` money metric with `current-period` coverage. The DISPLAYED number is `percent`
- * (% of the spend cap consumed), but severity is judged on the absolute money spent
- * (`usedMinor / 10^exponent`) — a display-value-vs-severity-basis split. `usedMinor`/`capMinor`
- * are minor units (e.g. cents) sharing a single `exponent`; `currency` is the ISO 4217 account
- * currency (e.g. "CAD"). `autoReloadOn` is the tolerantly-decoded auto-reload signal (only the
- * out-of-credits state renders it, but it is carried for every state). The base `value` is the
- * money spent, matching the `money` unit.
- */
-export interface UsageSpendActiveSnapshot extends NormalizedSnapshotBase {
+interface UsageSpendActiveSnapshotBase extends NormalizedSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-spend";
@@ -107,12 +97,24 @@ export interface UsageSpendActiveSnapshot extends NormalizedSnapshotBase {
   readonly coverage: CurrentPeriodCoverage;
   readonly spendState: "active";
   readonly autoReloadOn: boolean;
-  readonly percent: number;
   readonly usedMinor: number;
-  readonly capMinor: number;
   readonly currency: string;
   readonly exponent: number;
 }
+
+/** Capped spend displayed as percent consumed, while absolute money spent drives severity. */
+export interface UsageSpendCappedActiveSnapshot extends UsageSpendActiveSnapshotBase {
+  readonly spendDisplay?: "percent-of-cap";
+  readonly percent: number;
+  readonly capMinor: number;
+}
+
+/** Money-only spend with no percentage or allowance denominator (for example Kimi Extra Usage). */
+export interface UsageSpendMoneyActiveSnapshot extends UsageSpendActiveSnapshotBase {
+  readonly spendDisplay: "money-used";
+}
+
+export type UsageSpendActiveSnapshot = UsageSpendCappedActiveSnapshot | UsageSpendMoneyActiveSnapshot;
 
 /**
  * Extra-usage SPEND snapshot in a non-gauge STATUS state (Claude Code "Credits" category): `off`

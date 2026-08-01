@@ -15,6 +15,7 @@ import { Cause, Context, Deferred, Effect, ExecutionStrategy, Exit, Layer, Ref, 
 import type { AdapterFetchFailure } from "./effect-fetch.js";
 import { makeGovernorBackedAttemptContext, type GovernorBackedAttemptContext } from "./governed-request.js";
 import type { ClaudeCodeUsageResponse } from "./providers/usage/claude-code/index.js";
+import type { KimiCodeUsageResponse } from "./providers/usage/kimi-code/index.js";
 
 /**
  * Adapter-local operation executed by one source flight. Each registry is
@@ -61,6 +62,14 @@ interface AdapterSourceFlightCapabilityInternals {
       PlatformHttpClient.HttpClient
     >,
   ) => Effect.Effect<ClaudeCodeUsageResponse, AdapterFetchFailure | GovernorBlocked, PlatformHttpClient.HttpClient>;
+  readonly runKimiCodeUsageSource: (
+    identity: AdapterSourceRequestIdentity,
+    operation: AdapterSourceFlightOperation<
+      KimiCodeUsageResponse,
+      AdapterFetchFailure | GovernorBlocked,
+      PlatformHttpClient.HttpClient
+    >,
+  ) => Effect.Effect<KimiCodeUsageResponse, AdapterFetchFailure | GovernorBlocked, PlatformHttpClient.HttpClient>;
   readonly advanceCredentialGeneration: (credentialProfileId: string) => Effect.Effect<number>;
   readonly shutdown: () => Effect.Effect<void>;
 }
@@ -125,6 +134,19 @@ export function runClaudeCodeUsageSource(
   return capability[adapterSourceFlightCapabilityInternals].runClaudeCodeUsageSource(identity, operation);
 }
 
+/** Adapter-only Kimi bridge to the plugin-scoped homogeneous managed-usage registry. */
+export function runKimiCodeUsageSource(
+  capability: AdapterSourceFlightRuntimeCapability,
+  identity: AdapterSourceRequestIdentity,
+  operation: AdapterSourceFlightOperation<
+    KimiCodeUsageResponse,
+    AdapterFetchFailure | GovernorBlocked,
+    PlatformHttpClient.HttpClient
+  >,
+): Effect.Effect<KimiCodeUsageResponse, AdapterFetchFailure | GovernorBlocked, PlatformHttpClient.HttpClient> {
+  return capability[adapterSourceFlightCapabilityInternals].runKimiCodeUsageSource(identity, operation);
+}
+
 /** Safe lifecycle bridge used by the app composition root. */
 export function advanceAdapterSourceCredentialGeneration(
   capability: AdapterSourceFlightRuntimeCapability,
@@ -169,7 +191,20 @@ export function makeAdapterSourceFlightRuntime(
       AdapterFetchFailure | GovernorBlocked,
       PlatformHttpClient.HttpClient
     >(lifetime, governor, claudeCodeUsageFlights, observer.onClaudeCodeUsageSubscriberRegistered);
-    const runtime = new RuntimeAdapterSourceFlightRuntime(lifetime, governor, claudeCodeUsageRegistry);
+    const kimiCodeUsageFlights = yield* Ref.make<
+      ReadonlyMap<string, SourceFlight<KimiCodeUsageResponse, AdapterFetchFailure | GovernorBlocked>>
+    >(new Map());
+    const kimiCodeUsageRegistry = new HomogeneousSourceFlightRegistry<
+      KimiCodeUsageResponse,
+      AdapterFetchFailure | GovernorBlocked,
+      PlatformHttpClient.HttpClient
+    >(lifetime, governor, kimiCodeUsageFlights);
+    const runtime = new RuntimeAdapterSourceFlightRuntime(
+      lifetime,
+      governor,
+      claudeCodeUsageRegistry,
+      kimiCodeUsageRegistry,
+    );
     yield* Effect.addFinalizer(() => runtime.shutdown());
     return runtime;
   });
@@ -202,11 +237,17 @@ class RuntimeAdapterSourceFlightRuntime implements AdapterSourceFlightRuntime {
       AdapterFetchFailure | GovernorBlocked,
       PlatformHttpClient.HttpClient
     >,
+    private readonly kimiCodeUsageRegistry: AdapterSourceFlightRegistry<
+      KimiCodeUsageResponse,
+      AdapterFetchFailure | GovernorBlocked,
+      PlatformHttpClient.HttpClient
+    >,
   ) {
     this.capability = {
       [adapterSourceFlightCapabilityInternals]: {
         executeSource: (identity, operation) => this.runSource(identity, operation),
         runClaudeCodeUsageSource: (identity, operation) => this.runClaudeCodeUsageSource(identity, operation),
+        runKimiCodeUsageSource: (identity, operation) => this.runKimiCodeUsageSource(identity, operation),
         advanceCredentialGeneration: (credentialProfileId) => this.advanceCredentialGeneration(credentialProfileId),
         shutdown: () => this.shutdown(),
       },
@@ -268,6 +309,33 @@ class RuntimeAdapterSourceFlightRuntime implements AdapterSourceFlightRuntime {
           normalizedRequestVariant: identity.normalizedRequestVariant,
         };
         return yield* this.claudeCodeUsageRegistry.run(sourceIdentity, operation);
+      }),
+    );
+
+  runKimiCodeUsageSource = (
+    identity: AdapterSourceRequestIdentity,
+    operation: AdapterSourceFlightOperation<
+      KimiCodeUsageResponse,
+      AdapterFetchFailure | GovernorBlocked,
+      PlatformHttpClient.HttpClient
+    >,
+  ): Effect.Effect<KimiCodeUsageResponse, AdapterFetchFailure | GovernorBlocked, PlatformHttpClient.HttpClient> =>
+    Effect.scoped(
+      Effect.gen(this, function* () {
+        const credentialGeneration = yield* this.governor.credentialGenerationFor({
+          credentialProfileId: identity.credentialProfileId,
+        });
+        const sourceIdentity: SourceRequestIdentityInput = {
+          rateLimitScope: {
+            providerId: identity.providerId,
+            credentialProfileId: identity.credentialProfileId,
+            credentialGeneration,
+            rateLimitDomain: identity.rateLimitDomain,
+          },
+          sourceIdentity: identity.sourceIdentity,
+          normalizedRequestVariant: identity.normalizedRequestVariant,
+        };
+        return yield* this.kimiCodeUsageRegistry.run(sourceIdentity, operation);
       }),
     );
 

@@ -39,6 +39,7 @@ const DEFAULT_ACTION_SETTINGS_BY_FAMILY = {
 const LEGACY_USAGE_PROVIDER_IDS = {
   claude: "claude-code",
   codex: "codex",
+  kimi: "kimi-code",
   zai: "zai-coding-plan",
   // MiniMax has no old-plugin rename; the Property Inspector saves its own id under the
   // `provider` key, so it must resolve to itself (same self-mapping pattern as `codex`).
@@ -73,6 +74,7 @@ const LEGACY_USAGE_WINDOWS = {
   resets: "resets",
   fable: "fable",
   "credit-spend": "credit-spend",
+  "extra-usage": "extra-usage",
 } as const satisfies Readonly<Record<string, SchedulerWindowOrPeriod>>;
 const LEGACY_USAGE_WINDOW_LOOKUP: Readonly<Record<string, SchedulerWindowOrPeriod>> = LEGACY_USAGE_WINDOWS;
 

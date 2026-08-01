@@ -86,7 +86,7 @@ describe("provider registry catalog completeness", () => {
 });
 
 describe("provider registry metadata derives shared contract truth", () => {
-  it("declares only Claude Code's four compatible usage categories for accepted source fan-out", () => {
+  it("declares accepted source fan-out for compatible Claude Code and Kimi Code categories", () => {
     expect(firstCapability("claude-code")?.supportedWindows).toEqual([
       "five-hour",
       "seven-day",
@@ -94,6 +94,14 @@ describe("provider registry metadata derives shared contract truth", () => {
       "credit-spend",
     ]);
     expect(firstCapability("claude-code")?.coordinationPolicy).toEqual({
+      rateLimitDomain: "provider-profile",
+      sourceIdentity: "adapter-declared",
+      sourceSharing: "fan-out",
+      rateLimitDomainEvidence: { status: "not-required" },
+      sourceSharingEvidence: { status: "accepted", source: "local-source" },
+    });
+    expect(firstCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
+    expect(firstCapability("kimi-code")?.coordinationPolicy).toEqual({
       rateLimitDomain: "provider-profile",
       sourceIdentity: "adapter-declared",
       sourceSharing: "fan-out",
@@ -111,7 +119,9 @@ describe("provider registry metadata derives shared contract truth", () => {
       sourceSharingEvidence: { status: "not-required" },
     });
 
-    for (const capability of allCapabilities().filter((capability) => capability.providerId !== "claude-code")) {
+    for (const capability of allCapabilities().filter(
+      (capability) => capability.providerId !== "claude-code" && capability.providerId !== "kimi-code",
+    )) {
       expect(capability.coordinationPolicy).toEqual({
         rateLimitDomain: "provider-profile",
         sourceIdentity: "adapter-declared",
@@ -210,7 +220,7 @@ describe("provider registry metadata derives shared contract truth", () => {
 
     expect(asSortedSet(implementedProviderIds)).toEqual(asSortedSet([...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS]));
 
-    for (const providerId of ["claude-code", "codex"] as const) {
+    for (const providerId of ["claude-code", "codex", "kimi-code"] as const) {
       const capability = firstCapability(providerId);
       expect(capability?.implementationStatus).toBe("implemented");
       expect(capability?.sourceProofStatus).toBe("probeAccepted");
@@ -252,8 +262,8 @@ describe("provider registry metadata derives shared contract truth", () => {
 });
 
 describe("Usage provider gates and windows", () => {
-  it("models Claude Code and Codex as local-source Usage providers with percentage windows", () => {
-    for (const providerId of ["claude-code", "codex"] as const) {
+  it("models Claude Code, Codex, and Kimi Code as local-source Usage providers with percentage windows", () => {
+    for (const providerId of ["claude-code", "codex", "kimi-code"] as const) {
       const capability = firstCapability(providerId);
       expect(capability?.actionFamilyId).toBe("usage");
       expect(capability?.metricKind).toBe("usage-percent");
@@ -267,6 +277,7 @@ describe("Usage provider gates and windows", () => {
     // Codex additionally offers the evergreen "credits" and "resets"
     // categories.
     expect(firstCapability("codex")?.supportedWindows).toEqual(["five-hour", "seven-day", "credits", "resets"]);
+    expect(firstCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
   });
 
   it("resolves the Codex credits category to a lower-bound usage-credits metric with a no-default severity strategy", () => {
@@ -344,7 +355,7 @@ describe("Usage provider gates and windows", () => {
     });
 
     // Only Claude Code declares the fable window — codex/z.ai/minimax must not offer it.
-    for (const otherUsageProvider of ["codex", "zai-coding-plan", "minimax"] as const) {
+    for (const otherUsageProvider of ["codex", "kimi-code", "zai-coding-plan", "minimax"] as const) {
       expect(firstCapability(otherUsageProvider)?.supportedWindows?.includes("fable")).not.toBe(true);
     }
   });
@@ -369,10 +380,27 @@ describe("Usage provider gates and windows", () => {
     });
 
     // Only Claude Code declares the credit-spend window; the others fall back to the default metric.
-    for (const otherUsageProvider of ["codex", "zai-coding-plan", "minimax"] as const) {
+    for (const otherUsageProvider of ["codex", "kimi-code", "zai-coding-plan", "minimax"] as const) {
       expect(firstCapability(otherUsageProvider)?.supportedWindows?.includes("credit-spend")).not.toBe(true);
       expect(resolveCapabilityMetricForWindow(firstCapability(otherUsageProvider)!, "credit-spend").metricKind).toBe("usage-percent");
     }
+  });
+
+  it("resolves Kimi Code Extra Usage to the existing upper-bound usage-spend contract", () => {
+    const capability = firstCapability("kimi-code");
+    expect(capability).toBeDefined();
+    if (capability === undefined) {
+      return;
+    }
+
+    expect(resolveCapabilityMetricForWindow(capability, "extra-usage")).toEqual({
+      metricKind: "usage-spend",
+      metricDirection: "upper-bound",
+      displayUnit: "money",
+      displayBasis: "current-period-value",
+      coverageKind: "current-period",
+      severityStrategy: { kind: "requires-user-profile", reason: "absolute-threshold-requires-owner-profile" },
+    });
   });
 
   it("models z.ai as probe-accepted direct-key usage for five-hour and monthly MCP windows (weekly hidden — z.ai returns no weekly tier)", () => {

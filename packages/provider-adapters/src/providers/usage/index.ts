@@ -9,7 +9,7 @@ import {
   type EffectUsageSchedulerFetch,
 } from "../../effect-fetch.js";
 import { ProviderAdapterAttemptContext } from "../../governed-request.js";
-import { executeAdapterSource, runClaudeCodeUsageSource } from "../../source-flight-runtime.js";
+import { executeAdapterSource, runClaudeCodeUsageSource, runKimiCodeUsageSource } from "../../source-flight-runtime.js";
 import type { CreateUsageProviderSourceFetchInput, UsageProviderAdapterBinding } from "../../types.js";
 import {
   claudeCodeUsageProviderModule,
@@ -18,6 +18,12 @@ import {
   validateClaudeCodeUsageRequest,
 } from "./claude-code/index.js";
 import { codexUsageProviderModule } from "./codex/index.js";
+import {
+  createKimiCodeUsageSourceOperation,
+  kimiCodeUsageProviderModule,
+  projectKimiCodeUsageResponse,
+  validateKimiCodeUsageRequest,
+} from "./kimi-code/index.js";
 import { minimaxUsageProviderModule } from "./minimax/index.js";
 import { zaiCodingPlanUsageProviderModule } from "./zai-coding-plan/index.js";
 
@@ -36,6 +42,7 @@ export interface UsageProviderModule {
 export const usageProviderModules: readonly UsageProviderModule[] = [
   claudeCodeUsageProviderModule,
   codexUsageProviderModule,
+  kimiCodeUsageProviderModule,
   zaiCodingPlanUsageProviderModule,
   minimaxUsageProviderModule,
 ];
@@ -77,6 +84,37 @@ export function createUsageProviderSourceFetchEffect(
           ),
         ),
         Effect.flatMap((body) => projectClaudeCodeUsageResponse(body, request, input.now)),
+        Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
+      );
+  }
+
+  if (
+    input.providerId === "kimi-code" &&
+    input.sourceFlightRuntime !== undefined &&
+    input.credentialProfileId !== undefined &&
+    input.rateLimitDomain !== undefined
+  ) {
+    const source = createKimiCodeUsageSourceOperation(input);
+    const sourceFlightRuntime = input.sourceFlightRuntime;
+    const credentialProfileId = input.credentialProfileId;
+    const rateLimitDomain = input.rateLimitDomain;
+
+    return (request) =>
+      validateKimiCodeUsageRequest(request).pipe(
+        Effect.zipRight(
+          runKimiCodeUsageSource(
+            sourceFlightRuntime,
+            {
+              providerId: "kimi-code",
+              credentialProfileId,
+              rateLimitDomain,
+              sourceIdentity: "managed-usage",
+              normalizedRequestVariant: "default",
+            },
+            (attempts) => source(request).pipe(Effect.provideService(ProviderAdapterAttemptContext, attempts)),
+          ),
+        ),
+        Effect.flatMap((body) => projectKimiCodeUsageResponse(body, request, input.now)),
         Effect.mapError((failure) => (isGovernorBlocked(failure) ? schedulerFailureFromGovernorBlocked(failure) : failure)),
       );
   }

@@ -707,8 +707,8 @@ describe("provider adapter source policy", () => {
     const inventory = productionSourceInventory();
     const findings = inspectSourcePolicyProgram(inventory.program, inventory.sourcePaths, [usageDispatchPath]);
 
-    expect(providerModulePaths).toHaveLength(16);
-    expect(inventory.sourcePaths).toHaveLength(30);
+    expect(providerModulePaths).toHaveLength(17);
+    expect(inventory.sourcePaths).toHaveLength(31);
     expect(inventory.sourcePaths).toEqual(expect.arrayContaining([...inventory.runtimeRootPaths]));
     expect(inventory.sourcePaths).toEqual(expect.arrayContaining([
       balanceDispatchPath,

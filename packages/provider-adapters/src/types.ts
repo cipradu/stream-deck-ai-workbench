@@ -115,6 +115,17 @@ export type CodexCredentialResult =
       readonly reasonCode: "codex-auth-missing" | "codex-auth-malformed" | "codex-auth-wrong-mode";
     };
 
+export type KimiCodeCredentialResult =
+  | {
+      readonly ok: true;
+      readonly accessToken: string;
+      readonly expiresAtEpochSeconds?: number;
+    }
+  | {
+      readonly ok: false;
+      readonly reasonCode: "kimi-code-auth-missing" | "kimi-code-auth-malformed";
+    };
+
 export interface CodexSessionSnapshot {
   readonly fiveHourPercent?: number;
   readonly sevenDayPercent?: number;
@@ -130,6 +141,9 @@ export interface UsageProviderLocalSourceReaders {
   readonly codex?: {
     readonly readCredential: () => Promise<CodexCredentialResult>;
     readonly readSessionSnapshot: () => Promise<CodexSessionSnapshot | undefined>;
+  };
+  readonly kimiCode?: {
+    readonly readCredential: () => Promise<KimiCodeCredentialResult>;
   };
 }
 

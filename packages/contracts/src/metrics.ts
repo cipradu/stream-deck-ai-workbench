@@ -14,8 +14,19 @@
  * `credit-spend` is a claude-code-only extra-usage SPEND category (the OAuth
  * usage response's `spend` object): an upper-bound `usage-spend` money metric
  * with `current-period` coverage — distinct from the Codex `credits` count pool.
+ * `extra-usage` is the Kimi Code booster-wallet spend category and shares the
+ * same `usage-spend` contract without sharing Claude Code's provider-specific id.
  */
-export const USAGE_WINDOW_IDS = ["five-hour", "seven-day", "monthly-mcp", "credits", "resets", "fable", "credit-spend"] as const;
+export const USAGE_WINDOW_IDS = [
+  "five-hour",
+  "seven-day",
+  "monthly-mcp",
+  "credits",
+  "resets",
+  "fable",
+  "credit-spend",
+  "extra-usage",
+] as const;
 export type UsageWindowId = (typeof USAGE_WINDOW_IDS)[number];
 
 /**

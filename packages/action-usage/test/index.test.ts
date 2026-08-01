@@ -67,10 +67,10 @@ describe("@ai-workbench/action-usage public surface", () => {
 });
 
 describe("Usage catalog and source gates", () => {
-  it("lists Claude Code, Codex, z.ai, and MiniMax from registry metadata with supported windows and gates", () => {
+  it("lists every Usage provider from registry metadata with supported windows and gates", () => {
     const options = listUsageProviderOptions();
 
-    expect(options.map((option) => option.providerId)).toEqual(["claude-code", "codex", "zai-coding-plan", "minimax"]);
+    expect(options.map((option) => option.providerId)).toEqual(["claude-code", "codex", "kimi-code", "zai-coding-plan", "minimax"]);
     expect(options).toContainEqual(
       expect.objectContaining({
         providerId: "claude-code",
@@ -88,6 +88,18 @@ describe("Usage catalog and source gates", () => {
         providerId: "codex",
         productLabel: "Codex",
         supportedWindows: ["five-hour", "seven-day", "credits", "resets"],
+        implementationStatus: "implemented",
+        sourceProofStatus: "probeAccepted",
+        fetchAllowed: true,
+        selectionEligible: true,
+        credentialClasses: ["local-read-only-source"],
+      }),
+    );
+    expect(options).toContainEqual(
+      expect.objectContaining({
+        providerId: "kimi-code",
+        productLabel: "Kimi Code",
+        supportedWindows: ["five-hour", "seven-day", "extra-usage"],
         implementationStatus: "implemented",
         sourceProofStatus: "probeAccepted",
         fetchAllowed: true,

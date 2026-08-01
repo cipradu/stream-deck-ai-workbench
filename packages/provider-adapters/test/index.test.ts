@@ -3347,7 +3347,7 @@ describe("provider capability module structure", () => {
       expect(existsSync(modulePath), `${relative(sourceRoot, modulePath)} should exist`).toBe(true);
     }
 
-    expect(providerCapabilityEntries("usage")).toEqual(["claude-code", "codex", "index.ts", "minimax", "zai-coding-plan"]);
+    expect(providerCapabilityEntries("usage")).toEqual(["claude-code", "codex", "index.ts", "kimi-code", "minimax", "zai-coding-plan"]);
     expect(providerCapabilityEntries("balance")).toEqual([
       "anthropic-api",
       "deepgram",
@@ -3386,7 +3386,7 @@ describe("Usage source-gated adapter bindings", () => {
   it("exposes Usage adapter bindings as fetchable source adapters", () => {
     const bindings = listUsageProviderAdapterBindings();
 
-    expect(bindings.map((binding) => binding.providerId)).toEqual(["claude-code", "codex", "zai-coding-plan", "minimax"]);
+    expect(bindings.map((binding) => binding.providerId)).toEqual(["claude-code", "codex", "kimi-code", "zai-coding-plan", "minimax"]);
     expect(bindings).toContainEqual(
       expect.objectContaining({
         adapterBindingId: "usage.claude-code",

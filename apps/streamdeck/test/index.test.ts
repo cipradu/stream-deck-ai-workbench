@@ -1,4 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Duration, Effect, ManagedRuntime, Redacted, TestClock, TestContext } from "effect";
@@ -35,7 +37,13 @@ import { renderDisplayInput } from "../src/renderer.js";
 import { createAppManagedRuntime, createRuntimeServices } from "../src/runtime.js";
 import { createSchedulerFetchForActionSettings, withFetchPathLogging } from "../src/scheduler-fetch.js";
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
-import { parseClaudeCodeKeychainPayload, parseCodexAuthJsonPayload, parseLastRateLimitsLine } from "../src/local-usage-sources.js";
+import {
+  parseClaudeCodeKeychainPayload,
+  parseCodexAuthJsonPayload,
+  parseKimiCodeCredentialPayload,
+  parseLastRateLimitsLine,
+  readKimiCodeCredential,
+} from "../src/local-usage-sources.js";
 import {
   defaultActionSettingsForFamily,
   legacySeverityProfileForBalanceInput,
@@ -669,13 +677,14 @@ describe("scheduler fetch-path logging", () => {
 });
 
 describe("provider logo assets", () => {
-  it("every deployed provider logo, including minimax, prepares to a renderable lockup", async () => {
+  it("every deployed provider logo, including Kimi and MiniMax, prepares to a renderable lockup", async () => {
     // The renderer loads provider artwork from <plugin>.sdPlugin/assets/logos/<file>.svg at runtime
     // (bundle-relative, so renderDisplayInput cannot exercise it from src). Iterating the deployed set
     // is the only coverage of that path and catches a missing or broken SVG — minimax was the gap here.
     const logosDirUrl = new URL("../com.blackice.ai-workbench.sdPlugin/assets/logos/", import.meta.url);
     const files = (await readdir(fileURLToPath(logosDirUrl))).filter((name) => name.endsWith(".svg"));
     expect(files).toContain("minimax.svg");
+    expect(files).toContain("kimi.svg");
     for (const file of files) {
       const prepared = prepareLogoSvg(await readFile(fileURLToPath(new URL(file, logosDirUrl)), "utf8"));
       expect({ file, renderable: prepared !== undefined && prepared.body.length > 0 }).toEqual({ file, renderable: true });
@@ -734,6 +743,7 @@ describe("Property Inspector registry data and static UI", () => {
 
     const claudeCode = usageOptions.find((option) => option.providerId === "claude-code");
     const codex = usageOptions.find((option) => option.providerId === "codex");
+    const kimiCode = usageOptions.find((option) => option.providerId === "kimi-code");
     const fal = balanceOptions.find((option) => option.providerId === "fal");
     expect(claudeCode).toMatchObject({
       productLabel: "Claude Code",
@@ -743,10 +753,15 @@ describe("Property Inspector registry data and static UI", () => {
       productLabel: "Codex",
       selectionEligible: true,
     });
+    expect(kimiCode).toMatchObject({
+      productLabel: "Kimi Code",
+      selectionEligible: true,
+    });
     expect(claudeCode).not.toHaveProperty("availabilityLabel");
     expect(codex).not.toHaveProperty("availabilityLabel");
     expect(claudeCode).not.toHaveProperty("credentialClass");
     expect(codex).not.toHaveProperty("credentialClass");
+    expect(kimiCode).not.toHaveProperty("credentialClass");
     expect(fal).toMatchObject({
       productLabel: "Fal.AI",
       selectionEligible: true,
@@ -768,10 +783,10 @@ describe("Property Inspector registry data and static UI", () => {
 
     // Old settings vocabulary -> canonical provider ids (the settings boundary
     // normalizes these on save). The static panel must mirror the registry.
-    const legacyUsageIds = { "claude-code": "claude", codex: "codex", "zai-coding-plan": "zai", minimax: "minimax" } as const;
+    const legacyUsageIds = { "claude-code": "claude", codex: "codex", "kimi-code": "kimi", "zai-coding-plan": "zai", minimax: "minimax" } as const;
     // "credits"/"resets"/"fable"/"credit-spend" are new current-vocabulary categories with no
     // old-plugin rename; each locks the registry↔PI window lockstep the same as the rolling windows.
-    const legacyWindowIds = { "five-hour": "five_hour", "seven-day": "weekly", "monthly-mcp": "mcp_monthly", credits: "credits", resets: "resets", fable: "fable", "credit-spend": "credit-spend" } as const;
+    const legacyWindowIds = { "five-hour": "five_hour", "seven-day": "weekly", "monthly-mcp": "mcp_monthly", credits: "credits", resets: "resets", fable: "fable", "credit-spend": "credit-spend", "extra-usage": "extra-usage" } as const;
 
     const options = listProviderOptionsForFamily("usage");
     const optionValues = [...usageHtml.matchAll(/<option value="([^"]+)">([^<]+)<\/option>/g)].map((match) => [match[1], match[2]]);
@@ -794,6 +809,11 @@ describe("Property Inspector registry data and static UI", () => {
       const panelWindows = [...rowSlice.matchAll(/\["([^"]+)",/g)].map((match) => match[1]);
       expect(panelWindows).toEqual(declared);
     }
+    expect(usageHtml).not.toContain("Kimi Code API Key");
+    expect(usageHtml).toContain('kimi: { "extra-usage": { fires: "above" } }');
+    expect(usageHtml).toContain('"Turn AMBER above"');
+    expect(usageHtml).toContain('"Turn RED above"');
+    expect(usageHtml).not.toContain("when spend exceeds amount");
   });
 
   it("mirrors the Balance panel's static vendor list, labels, and credential copy against the registry (parity guard)", async () => {
@@ -942,6 +962,18 @@ describe("settings boundary and PI writes", () => {
       value: {
         providerId: "openai-api",
         refreshIntervalSeconds: 900,
+      },
+    });
+    expect(
+      parseActionSettingsForFamily("usage", {
+        provider: "kimi",
+        window: "extra-usage",
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        providerId: "kimi-code",
+        windowOrPeriod: "extra-usage",
       },
     });
     expect(parseActionSettingsForFamily("usage", { provider: "zai", apiKey: RAW_NEEDLES.apiKey })).toMatchObject({
@@ -1544,6 +1576,36 @@ describe("Codex resets floors migration", () => {
   });
 });
 
+describe("Kimi Code Extra Usage floors migration", () => {
+  it("maps extra-usage floors to an upper-bound absolute severity profile", () => {
+    const profile = legacySeverityProfileForUsageInput({
+      providerId: "kimi-code",
+      windowOrPeriod: "extra-usage",
+      warnFloor: 10,
+      criticalFloor: 20,
+    });
+    expect(profile).toEqual({
+      profileId: "floors:usage:kimi-code:extra-usage",
+      thresholds: { direction: "upper-bound", basis: "absolute", warningAt: 10, criticalAt: 20 },
+    });
+
+    const parsed = parseActionSettingsForFamily("usage", {
+      provider: "kimi",
+      window: "extra-usage",
+      warnFloor: 10,
+      criticalFloor: 20,
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        providerId: "kimi-code",
+        windowOrPeriod: "extra-usage",
+        severityProfileRef: { kind: "severity-profile", profileId: "floors:usage:kimi-code:extra-usage" },
+      },
+    });
+  });
+});
+
 describe("Claude Code credit-spend floors migration", () => {
   it("maps claude-code credit-spend floors to an UPPER-BOUND absolute severity profile the engine fires ABOVE", () => {
     const profile = legacySeverityProfileForUsageInput({
@@ -1839,6 +1901,61 @@ describe("local usage source parsing (read-only stores)", () => {
       ok: false,
       reasonCode: "codex-auth-malformed",
     });
+  });
+
+  it("parses only the Kimi Code access token and Unix-seconds expiry", () => {
+    expect(
+      parseKimiCodeCredentialPayload(
+        JSON.stringify({ access_token: "fixture-kimi-access", expires_at: 1_800_000_000, refresh_token: "ignored" }),
+      ),
+    ).toEqual({
+      ok: true,
+      accessToken: "fixture-kimi-access",
+      expiresAtEpochSeconds: 1_800_000_000,
+    });
+    expect(parseKimiCodeCredentialPayload(JSON.stringify({ access_token: "fixture-kimi-access" }))).toEqual({
+      ok: true,
+      accessToken: "fixture-kimi-access",
+    });
+    expect(parseKimiCodeCredentialPayload(JSON.stringify({ access_token: "", expires_at: 1_800_000_000 }))).toEqual({
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    });
+    expect(parseKimiCodeCredentialPayload(JSON.stringify({ access_token: "fixture-kimi-access", expires_at: "seconds" }))).toEqual({
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    });
+    expect(parseKimiCodeCredentialPayload("{broken")).toEqual({
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    });
+  });
+
+  it("resolves KIMI_CODE_HOME at read time without modifying the credential", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ai-workbench-kimi-"));
+    const credentialDir = join(root, "credentials");
+    const previousHome = process.env.KIMI_CODE_HOME;
+    try {
+      await mkdir(credentialDir);
+      await writeFile(
+        join(credentialDir, "kimi-code.json"),
+        JSON.stringify({ access_token: "fixture-kimi-access", expires_at: 1_800_000_000, refresh_token: "ignored" }),
+        "utf8",
+      );
+      process.env.KIMI_CODE_HOME = root;
+      expect(await readKimiCodeCredential()).toEqual({
+        ok: true,
+        accessToken: "fixture-kimi-access",
+        expiresAtEpochSeconds: 1_800_000_000,
+      });
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.KIMI_CODE_HOME;
+      } else {
+        process.env.KIMI_CODE_HOME = previousHome;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

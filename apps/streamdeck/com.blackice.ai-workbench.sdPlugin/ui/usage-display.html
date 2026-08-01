@@ -10,6 +10,7 @@
 		<sdpi-select setting="provider" placeholder="Claude Code (default)">
 			<option value="claude">Claude Code</option>
 			<option value="codex">Codex</option>
+			<option value="kimi">Kimi Code</option>
 			<option value="zai">Z.AI</option>
 			<option value="minimax">MiniMax</option>
 		</sdpi-select>
@@ -68,6 +69,7 @@
 		const WINDOW_OPTIONS = {
 			claude: [["five_hour", "5-hour"], ["weekly", "Weekly"], ["fable", "Fable"], ["credit-spend", "Credits"]],
 			codex: [["five_hour", "5-hour"], ["weekly", "Weekly"], ["credits", "Credits"], ["resets", "Resets"]],
+			kimi: [["five_hour", "5-hour"], ["weekly", "Weekly"], ["extra-usage", "Extra Usage"]],
 			zai: [["five_hour", "5-hour"], ["mcp_monthly", "MCP tools (monthly)"]],
 			minimax: [["five_hour", "5-hour"], ["weekly", "Weekly"]],
 		};
@@ -78,13 +80,13 @@
 		// Per-provider/window user-floor categories, shown ONLY when the matching category is selected.
 		// The lower-bound Codex "credits"/"resets" categories fire at-or-BELOW a floor ("credits" on the
 		// remaining count, "resets" on the DAYS of reset-credit runway). The claude-code "credit-spend"
-		// category is UPPER-BOUND: it fires when the money SPENT rises ABOVE an absolute dollar amount (the
-		// label reads "exceeds amount" — no currency word or symbol; the key shows a plain "$"). Every other
+		// category is UPPER-BOUND: it fires when the money SPENT rises ABOVE an absolute dollar amount. Every other
 		// provider/window is an upper-bound percentage that uses the built-in registry defaults and shows
 		// no floor fields.
 		const FLOOR_CATEGORIES = {
 			codex: { credits: { unit: "credits", fires: "below" }, resets: { unit: "days", fires: "below" } },
-			claude: { "credit-spend": { fires: "exceeds" } },
+			claude: { "credit-spend": { fires: "above" } },
+			kimi: { "extra-usage": { fires: "above" } },
 		};
 
 		const providerSelect = document.querySelector('sdpi-select[setting="provider"]');
@@ -104,16 +106,15 @@
 				item.style.display = isFloorCategory ? "" : "none";
 			}
 			if (isFloorCategory) {
-				// Direction-aware wording: the upper-bound spend guard fires when spend EXCEEDS the entered
-				// amount (no currency word — plain amount in the account's dollars); a lower-bound remaining
+				// Direction-aware wording: the upper-bound spend guard fires ABOVE the entered amount; a lower-bound remaining
 				// count / days-of-runway fires BELOW the floor.
 				const warnLabel =
-					category.fires === "exceeds"
-						? "Turn AMBER when spend exceeds amount"
+					category.fires === "above"
+						? "Turn AMBER above"
 						: `Turn AMBER below (${category.unit})`;
 				const criticalLabel =
-					category.fires === "exceeds"
-						? "Turn RED when spend exceeds amount"
+					category.fires === "above"
+						? "Turn RED above"
 						: `Turn RED below (${category.unit})`;
 				document.getElementById("floor-warn").setAttribute("label", warnLabel);
 				document.getElementById("floor-critical").setAttribute("label", criticalLabel);

@@ -58,6 +58,7 @@ const BALANCE_PROVIDER_BASE_URLS = {
 const USAGE_PROVIDER_BASE_URLS = {
   "claude-code": "https://api.anthropic.com",
   codex: "https://chatgpt.com",
+  "kimi-code": "https://api.kimi.com/coding/v1",
   "zai-coding-plan": "https://api.z.ai",
   // MiniMax global host (owner live-probe-confirmed 2026-07-10). The adapter appends the
   // `/v1/coding_plan/remains` path. Mainland region-switching is a future option, not modeled now.

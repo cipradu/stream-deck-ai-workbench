@@ -1076,3 +1076,60 @@ describe("Claude Code credit-spend category display", () => {
     expect(usageWindowShortLabel("credit-spend")).toBe("Credits");
   });
 });
+
+describe("Kimi Code Extra Usage display", () => {
+  const kimiSpend = (usedMinor: number): NormalizedSnapshot => ({
+    familyId: "usage",
+    providerId: "kimi-code",
+    metricKind: "usage-spend",
+    metricDirection: "upper-bound",
+    unit: "money",
+    coverage: { kind: "current-period" },
+    value: usedMinor / 100,
+    fetchedAtEpochMs: 1_000,
+    spendState: "active",
+    spendDisplay: "money-used",
+    autoReloadOn: false,
+    usedMinor,
+    currency: "USD",
+    exponent: 2,
+  });
+
+  const SPEND_STRATEGY = { kind: "requires-user-profile", reason: "absolute-threshold-requires-owner-profile" } as const;
+
+  it("shows the dollar amount without a percentage gauge", () => {
+    const formatted = formatDisplayValue({ snapshot: kimiSpend(1_250) });
+
+    expect(formatted).toMatchObject({
+      valueText: "$12.50",
+      valueLabel: "spent",
+      displayValue: 12.5,
+      severityBasisValue: 12.5,
+      coverageMarker: "current period",
+    });
+    expect(formatted.progressPercent).toBeUndefined();
+    expect(formatted.secondaryLine).toBeUndefined();
+  });
+
+  it("turns amber and red at or above the configured dollar thresholds", () => {
+    const render = (usedMinor: number) =>
+      buildRendererInput({
+        schedulerOutput: {
+          schedulerKey: "usage:kimi-code:extra-usage",
+          displayState: "fresh",
+          refreshIntervalSeconds: 600,
+          activeRefCount: 1,
+          inFlight: false,
+          snapshot: kimiSpend(usedMinor),
+        },
+        actionFamilyId: "usage",
+        providerId: "kimi-code",
+        severityStrategy: SPEND_STRATEGY,
+        thresholds: { direction: "upper-bound", basis: "absolute", warningAt: 10, criticalAt: 20 },
+      });
+
+    expect(render(999)).toMatchObject({ severity: "healthy", rendererSeverityState: "normal" });
+    expect(render(1_000)).toMatchObject({ severity: "warning", rendererSeverityState: "warning" });
+    expect(render(2_000)).toMatchObject({ severity: "critical", rendererSeverityState: "critical" });
+  });
+});

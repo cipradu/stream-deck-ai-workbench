@@ -7,12 +7,14 @@ import type {
   ClaudeCodeCredentialResult,
   CodexCredentialResult,
   CodexSessionSnapshot,
+  KimiCodeCredentialResult,
   UsageProviderLocalSourceReaders,
 } from "@ai-workbench/provider-adapters";
 
 const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const DEFAULT_CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
+const DEFAULT_KIMI_CODE_HOME = join(homedir(), ".kimi-code");
 const CODEX_SESSION_TAIL_BYTES = 128 * 1024;
 const CODEX_USAGE_WINDOW_DURATIONS = {
   "five-hour": { seconds: 18_000, minutes: 300 },
@@ -40,6 +42,9 @@ export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders
     codex: {
       readCredential: () => readCodexAuthJsonCredential(),
       readSessionSnapshot: () => readNewestCodexSessionSnapshot(),
+    },
+    kimiCode: {
+      readCredential: () => readKimiCodeCredential(),
     },
   };
 }
@@ -125,6 +130,55 @@ export function parseCodexAuthJsonPayload(raw: string): CodexCredentialResult {
     ok: true,
     accessToken,
     accountId,
+  };
+}
+
+export async function readKimiCodeCredential(): Promise<KimiCodeCredentialResult> {
+  const kimiCodeHome = process.env.KIMI_CODE_HOME?.trim() || DEFAULT_KIMI_CODE_HOME;
+  const credentialPath = join(kimiCodeHome, "credentials", "kimi-code.json");
+  let raw: string;
+  try {
+    raw = await readFile(credentialPath, "utf8");
+  } catch {
+    return {
+      ok: false,
+      reasonCode: "kimi-code-auth-missing",
+    };
+  }
+
+  return parseKimiCodeCredentialPayload(raw);
+}
+
+/** Pure read-only parse of Kimi Code's local OAuth credential; refresh material is ignored. */
+export function parseKimiCodeCredentialPayload(raw: string): KimiCodeCredentialResult {
+  const parsed = parseJsonRecord(raw);
+  if (parsed === undefined) {
+    return {
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    };
+  }
+
+  const accessToken = parsed.access_token;
+  if (typeof accessToken !== "string" || accessToken.trim().length === 0) {
+    return {
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    };
+  }
+
+  const expiresAt = parsed.expires_at;
+  if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= 0)) {
+    return {
+      ok: false,
+      reasonCode: "kimi-code-auth-malformed",
+    };
+  }
+
+  return {
+    ok: true,
+    accessToken,
+    ...(expiresAt === undefined ? {} : { expiresAtEpochSeconds: expiresAt }),
   };
 }
 

@@ -454,9 +454,9 @@ function balanceCapability(input: {
 // "About" guidance, threshold unit words, and auth-expired hints replicate the
 // old working plugin's Property Inspector and key renderers verbatim
 // (stream-deck_before_effect ui/usage-display.html, ui/balance-display.html,
-// src/render/key-svg.ts, src/render/balance-key-svg.ts). Kimi and Mistral from
-// the old plugin remain excluded: the approved first-family catalog
-// does not include them. MiniMax was added 2026-07-10 as a later addition above
+// src/render/key-svg.ts, src/render/balance-key-svg.ts). Mistral from the old
+// plugin remains excluded. Kimi Code was owner-approved on 2026-08-01 as a
+// read-only local-source Usage provider. MiniMax was added 2026-07-10 as a later addition above
 // the first-family catalog, with a live-probe-confirmed coding-plan usage API.
 export const PROVIDER_REGISTRY = [
   {
@@ -544,6 +544,43 @@ export const PROVIDER_REGISTRY = [
         },
         presentation: {
           authExpiredHint: "run codex",
+        },
+      }),
+    ],
+  },
+  {
+    providerId: "kimi-code",
+    productLabel: "Kimi Code",
+    capabilities: [
+      usageCapability({
+        adapterBindingId: "usage.kimi-code",
+        implementationStatus: "implemented",
+        sourceProofStatus: "probeAccepted",
+        supportedWindows: ["five-hour", "seven-day", "extra-usage"],
+        coordinationPolicy: {
+          rateLimitDomain: {
+            kind: "provider-profile",
+            domain: "provider-profile",
+            evidence: { status: "not-required" },
+          },
+          sourceSharing: {
+            kind: "fan-out",
+            evidence: { status: "accepted", source: "local-source" },
+          },
+        },
+        credentialClasses: localSourceCredential,
+        requiredSettings: localSourceSettings,
+        categoryMetrics: {
+          "extra-usage": {
+            metricKind: "usage-spend",
+            displayBasis: "current-period-value",
+            coverageKind: "current-period",
+            severityStrategy: requiresUserProfileSeverity,
+          },
+        },
+        presentation: {
+          authExpiredHint: "open Kimi Code",
+          headerLabel: "Kimi",
         },
       }),
     ],

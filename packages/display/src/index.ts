@@ -344,6 +344,25 @@ export function formatDisplayValue(input: FormatDisplayValueInput): FormattedDis
   if (input.snapshot.familyId === "usage" && input.snapshot.metricKind === "usage-spend") {
     const spend = input.snapshot;
     if (spend.spendState === "active") {
+      const usedValue = spend.usedMinor / 10 ** spend.exponent;
+
+      // Kimi Code reports Extra Usage as money spent. Keep the amount as the prominent value and
+      // evaluate the user thresholds against that same upper-bound dollar value; it is not a
+      // percentage gauge.
+      if (spend.spendDisplay === "money-used") {
+        const symbol = CURRENCY_SYMBOLS[spend.currency];
+        return formatted({
+          snapshot: input.snapshot,
+          displayBasis: "current-period-value",
+          displayValue: usedValue,
+          severityBasisValue: usedValue,
+          valueText: symbol === undefined ? formatCountText(usedValue) : formatCurrencyText(usedValue, symbol),
+          valueLabel: "spent",
+          ...(symbol === undefined ? { unitRowText: spend.currency } : {}),
+          coverageMarker,
+        });
+      }
+
       // Active spend gauge: the DISPLAYED number is the percent of
       // the cap consumed (rendered like a usage-percent, gauge + progress), but severity is judged on
       // the absolute money SPENT (upper-bound: more spent is worse) — a display-value-vs-severity-basis
@@ -352,7 +371,6 @@ export function formatDisplayValue(input: FormatDisplayValueInput): FormattedDis
       // Plain "$" only — no currency code on the key (owner directive: the amounts read as
       // dollars, the currency word/code is dropped everywhere).
       const prefix = "$";
-      const usedValue = spend.usedMinor / 10 ** spend.exponent;
       const capValue = spend.capMinor / 10 ** spend.exponent;
       return formatted({
         snapshot: input.snapshot,
@@ -531,6 +549,8 @@ export function usageWindowShortLabel(window: string): string {
       return "Credits";
     case "credit-spend":
       return "Credits";
+    case "extra-usage":
+      return "Extra";
     case "resets":
       return "Resets";
     default:
@@ -880,6 +900,8 @@ function rollingWindowCoverageLabel(window: Extract<SnapshotCoverage, { readonly
     case "resets":
       return "reset-credits pool";
     case "credit-spend":
+      return "extra-usage spend";
+    case "extra-usage":
       return "extra-usage spend";
   }
 }

@@ -28,6 +28,7 @@ export type {
   ClaudeCodeCredentialResult,
   CodexCredentialResult,
   CodexSessionSnapshot,
+  KimiCodeCredentialResult,
   CreateBalanceProviderSourceFetchInput,
   CreateUsageProviderSourceFetchInput,
   CreateSourceGatedBalanceFetchInput,

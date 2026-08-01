@@ -380,6 +380,7 @@ function escapeXml(value: string): string {
 const LOGO_FILE_BY_PROVIDER: Readonly<Record<string, string>> = {
   "claude-code": "claude",
   codex: "codex",
+  "kimi-code": "kimi",
   "zai-coding-plan": "zai",
   minimax: "minimax",
   "anthropic-api": "anthropic",
