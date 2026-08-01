@@ -103,6 +103,7 @@ export function createKimiCodeUsageSourceOperation(
   PlatformHttpClient.HttpClient | ProviderAdapterAttemptContext
 > {
   const readCredential = input.localSources?.kimiCode?.readCredential;
+  const refreshCredential = input.localSources?.kimiCode?.refreshCredential;
   if (readCredential === undefined) {
     return () => Effect.fail({ failure: noSourceConfigured("usage-kimi-source-reader-missing").failure });
   }
@@ -118,11 +119,30 @@ export function createKimiCodeUsageSourceOperation(
         catch: () => credentialReadRejected(),
       }).pipe(Effect.map(normalizeCredentialRead));
       const nowMs = now?.() ?? (yield* Clock.currentTimeMillis);
+      let recoveryAttempted = false;
+
+      const recoverAndRead = Effect.gen(function* () {
+        recoveryAttempted = true;
+        let refreshCompleted = refreshCredential === undefined;
+        if (refreshCredential !== undefined) {
+          refreshCompleted = yield* Effect.tryPromise({
+            try: () => refreshCredential(),
+            catch: () => credentialRefreshRejected(),
+          }).pipe(
+            Effect.match({
+              onFailure: () => false,
+              onSuccess: () => true,
+            }),
+          );
+        }
+        const recoveredCredential = yield* readOnce;
+        return { credential: recoveredCredential, refreshCompleted } as const;
+      });
 
       let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
       let reRead = false;
       if (credential.ok && credentialIsExpired(credential, nowMs)) {
-        credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+        credential = (yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged))).credential;
         reRead = true;
       }
       if (!credential.ok) {
@@ -145,8 +165,14 @@ export function createKimiCodeUsageSourceOperation(
         ? attempt(credential.token)
         : attempt(credential.token).pipe(
             Effect.catchTag("UnauthorizedExpired", () =>
-              readOnce.pipe(
-                Effect.flatMap((refreshed) => {
+              (recoveryAttempted
+                ? readOnce.pipe(Effect.map((credential) => ({ credential, refreshCompleted: false }) as const))
+                : recoverAndRead
+              ).pipe(
+                Effect.flatMap(({ credential: refreshed, refreshCompleted }) => {
+                  if (!refreshCompleted) {
+                    return Effect.fail(credentialExpiredLocally());
+                  }
                   if (!refreshed.ok) {
                     return Effect.fail(missingCredentialsError(refreshed.reasonCode));
                   }
@@ -261,6 +287,14 @@ function credentialExpiredLocally(): UnauthorizedExpired {
 function credentialReadRejected(): MissingCredentials {
   return new MissingCredentials({
     reasonCode: "kimi-code-credential-read-failed",
+    boundary: CREDENTIAL_BOUNDARY,
+    providerFailureClass: "credentials",
+  });
+}
+
+function credentialRefreshRejected(): UnauthorizedExpired {
+  return new UnauthorizedExpired({
+    reasonCode: "kimi-code-credential-refresh-failed",
     boundary: CREDENTIAL_BOUNDARY,
     providerFailureClass: "credentials",
   });

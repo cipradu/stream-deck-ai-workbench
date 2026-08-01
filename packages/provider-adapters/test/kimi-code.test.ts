@@ -160,6 +160,178 @@ describe("Kimi Code usage projections", () => {
 });
 
 describe("Kimi Code credential and HTTP boundary", () => {
+  it("runs one CLI-owned recovery for a locally expired credential, rereads, and then fetches usage", async () => {
+    let reads = 0;
+    let refreshes = 0;
+    let calls = 0;
+    const source = createKimiCodeUsageSourceOperation({
+      providerId: "kimi-code",
+      baseUrl: "https://api.kimi.example/coding/v1",
+      resolveCredential: async () => {
+        throw new Error("Kimi must not use plugin credentials");
+      },
+      localSources: {
+        kimiCode: {
+          readCredential: async () => {
+            reads += 1;
+            return {
+              ok: true as const,
+              accessToken: FIXTURE_CREDENTIAL,
+              expiresAtEpochSeconds: NOW_MS / 1000 + (reads === 1 ? 0 : 3600),
+            };
+          },
+          refreshCredential: async () => {
+            refreshes += 1;
+          },
+        },
+      },
+      now: () => NOW_MS,
+    });
+    const httpLayer = Layer.succeed(
+      PlatformHttpClient.HttpClient,
+      PlatformHttpClient.make((httpRequest) => {
+        calls += 1;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            httpRequest,
+            new Response(JSON.stringify(response), { status: 200, headers: { "content-type": "application/json" } }),
+          ),
+        );
+      }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        source(request("five-hour")).pipe(
+          Effect.provideService(ProviderAdapterAttemptContext, {
+            attempt: (operation) => operation,
+            reportRateLimit: () => Effect.void,
+          }),
+          Effect.provide(httpLayer),
+        ),
+      ),
+    );
+
+    expect(outcome).toMatchObject({ _tag: "Right" });
+    expect(reads).toBe(2);
+    expect(refreshes).toBe(1);
+    expect(calls).toBe(1);
+    expect(JSON.stringify(outcome)).not.toContain(FIXTURE_CREDENTIAL);
+  });
+
+  it("fails without HTTP when one CLI recovery leaves the local credential expired", async () => {
+    let reads = 0;
+    let refreshes = 0;
+    let calls = 0;
+    const source = createKimiCodeUsageSourceOperation({
+      providerId: "kimi-code",
+      baseUrl: "https://api.kimi.example/coding/v1",
+      resolveCredential: async () => {
+        throw new Error("Kimi must not use plugin credentials");
+      },
+      localSources: {
+        kimiCode: {
+          readCredential: async () => {
+            reads += 1;
+            return { ok: true as const, accessToken: FIXTURE_CREDENTIAL, expiresAtEpochSeconds: NOW_MS / 1000 };
+          },
+          refreshCredential: async () => {
+            refreshes += 1;
+            throw new Error("sanitized CLI failure fixture");
+          },
+        },
+      },
+      now: () => NOW_MS,
+    });
+    const httpLayer = Layer.succeed(
+      PlatformHttpClient.HttpClient,
+      PlatformHttpClient.make(() => {
+        calls += 1;
+        return Effect.die("expired Kimi credential must not reach HTTP");
+      }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        source(request("five-hour")).pipe(
+          Effect.provideService(ProviderAdapterAttemptContext, {
+            attempt: (operation) => operation,
+            reportRateLimit: () => Effect.void,
+          }),
+          Effect.provide(httpLayer),
+        ),
+      ),
+    );
+
+    expect(reads).toBe(2);
+    expect(refreshes).toBe(1);
+    expect(calls).toBe(0);
+    expect(outcome).toMatchObject({ _tag: "Left", left: { failure: { category: "unauthorized-expired" } } });
+    expect(JSON.stringify(outcome)).not.toContain(FIXTURE_CREDENTIAL);
+  });
+
+  it("uses one CLI recovery after the first HTTP 401 and retries with the reread credential", async () => {
+    let reads = 0;
+    let refreshes = 0;
+    let calls = 0;
+    const source = createKimiCodeUsageSourceOperation({
+      providerId: "kimi-code",
+      baseUrl: "https://api.kimi.example/coding/v1",
+      resolveCredential: async () => {
+        throw new Error("Kimi must not use plugin credentials");
+      },
+      localSources: {
+        kimiCode: {
+          readCredential: async () => {
+            reads += 1;
+            return {
+              ok: true as const,
+              accessToken: `${FIXTURE_CREDENTIAL}-${reads}`,
+              expiresAtEpochSeconds: NOW_MS / 1000 + 3600,
+            };
+          },
+          refreshCredential: async () => {
+            refreshes += 1;
+          },
+        },
+      },
+      now: () => NOW_MS,
+    });
+    const httpLayer = Layer.succeed(
+      PlatformHttpClient.HttpClient,
+      PlatformHttpClient.make((httpRequest) => {
+        calls += 1;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            httpRequest,
+            new Response(calls === 1 ? JSON.stringify({ error: "unauthorized" }) : JSON.stringify(response), {
+              status: calls === 1 ? 401 : 200,
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+        );
+      }),
+    );
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        source(request("five-hour")).pipe(
+          Effect.provideService(ProviderAdapterAttemptContext, {
+            attempt: (operation) => operation,
+            reportRateLimit: () => Effect.void,
+          }),
+          Effect.provide(httpLayer),
+        ),
+      ),
+    );
+
+    expect(outcome).toMatchObject({ _tag: "Right" });
+    expect(reads).toBe(2);
+    expect(refreshes).toBe(1);
+    expect(calls).toBe(2);
+    expect(JSON.stringify(outcome)).not.toContain(FIXTURE_CREDENTIAL);
+  });
+
   it("re-reads a locally expired Unix-seconds credential once and makes no HTTP call at equality", async () => {
     let reads = 0;
     let calls = 0;

@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,7 @@ import {
   parseKimiCodeCredentialPayload,
   parseLastRateLimitsLine,
   readKimiCodeCredential,
+  refreshKimiCodeCredential,
 } from "../src/local-usage-sources.js";
 import {
   defaultActionSettingsForFamily,
@@ -1948,6 +1949,53 @@ describe("local usage source parsing (read-only stores)", () => {
         accessToken: "fixture-kimi-access",
         expiresAtEpochSeconds: 1_800_000_000,
       });
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.KIMI_CODE_HOME;
+      } else {
+        process.env.KIMI_CODE_HOME = previousHome;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs Kimi refresh through its absolute executable with isolated bounded process options", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ai-workbench-kimi-home-"));
+    const previousHome = process.env.KIMI_CODE_HOME;
+    let isolatedRoot: string | undefined;
+    try {
+      process.env.KIMI_CODE_HOME = root;
+      await refreshKimiCodeCredential(async (command) => {
+        isolatedRoot = command.cwd;
+        expect(command.command).toBe(join(root, "bin", "kimi"));
+        expect(command.args).toEqual([
+          "--prompt",
+          "Reply exactly OK. Do not use tools.",
+          "--output-format",
+          "text",
+          "--skills-dir",
+          command.cwd,
+        ]);
+        expect(command.cwd).toMatch(/ai-workbench-kimi-refresh-/);
+        expect(command.timeoutMs).toBe(60_000);
+        expect(command.maxBufferBytes).toBe(16 * 1024);
+        expect(command.env).toMatchObject({
+          HOME: homedir(),
+          KIMI_CODE_HOME: root,
+          NO_COLOR: "1",
+          SAFE_RUNTIME_MARKER: "preserved",
+        });
+        expect(command.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+        expect(command.env).not.toHaveProperty("KIMI_SESSION_TOKEN");
+      }, {
+        KIMI_CODE_HOME: root,
+        PATH: "/fixture/system/path",
+        SAFE_RUNTIME_MARKER: "preserved",
+        ANTHROPIC_API_KEY: "fixture-secret-must-not-reach-child",
+        KIMI_SESSION_TOKEN: "fixture-session-must-not-reach-child",
+      });
+      expect(isolatedRoot).toBeDefined();
+      await expect(readdir(isolatedRoot!)).rejects.toBeDefined();
     } finally {
       if (previousHome === undefined) {
         delete process.env.KIMI_CODE_HOME;

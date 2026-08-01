@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { open, readdir, readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
@@ -15,6 +15,10 @@ const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const DEFAULT_CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
 const DEFAULT_KIMI_CODE_HOME = join(homedir(), ".kimi-code");
+const KIMI_CODE_REFRESH_TIMEOUT_MS = 60_000;
+const KIMI_CODE_REFRESH_MAX_BUFFER_BYTES = 16 * 1024;
+const KIMI_CODE_REFRESH_PROMPT = "Reply exactly OK. Do not use tools.";
+const SENSITIVE_ENVIRONMENT_NAME = /(account|auth|cookie|credential|key|org|password|project|secret|session|team|token)/i;
 const CODEX_SESSION_TAIL_BYTES = 128 * 1024;
 const CODEX_USAGE_WINDOW_DURATIONS = {
   "five-hour": { seconds: 18_000, minutes: 300 },
@@ -34,6 +38,17 @@ interface ParsedCodexSessionWindow {
   readonly resetsAtEpochMs?: number;
 }
 
+export interface KimiCodeRefreshCommand {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly timeoutMs: number;
+  readonly maxBufferBytes: number;
+}
+
+export type KimiCodeRefreshCommandRunner = (command: KimiCodeRefreshCommand) => Promise<void>;
+
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
   return {
     claudeCode: {
@@ -45,6 +60,7 @@ export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders
     },
     kimiCode: {
       readCredential: () => readKimiCodeCredential(),
+      refreshCredential: () => refreshKimiCodeCredential(),
     },
   };
 }
@@ -149,6 +165,49 @@ export async function readKimiCodeCredential(): Promise<KimiCodeCredentialResult
   return parseKimiCodeCredentialPayload(raw);
 }
 
+export async function refreshKimiCodeCredential(
+  runCommand: KimiCodeRefreshCommandRunner = runKimiCodeRefreshCommand,
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const kimiCodeHome = sourceEnvironment.KIMI_CODE_HOME?.trim() || DEFAULT_KIMI_CODE_HOME;
+  const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-kimi-refresh-"));
+  try {
+    await runCommand({
+      command: join(kimiCodeHome, "bin", "kimi"),
+      args: [
+        "--prompt",
+        KIMI_CODE_REFRESH_PROMPT,
+        "--output-format",
+        "text",
+        "--skills-dir",
+        isolatedRoot,
+      ],
+      cwd: isolatedRoot,
+      env: sanitizedKimiCodeRefreshEnvironment(sourceEnvironment, kimiCodeHome),
+      timeoutMs: KIMI_CODE_REFRESH_TIMEOUT_MS,
+      maxBufferBytes: KIMI_CODE_REFRESH_MAX_BUFFER_BYTES,
+    });
+  } finally {
+    await rm(isolatedRoot, { recursive: true, force: true });
+  }
+}
+
+function sanitizedKimiCodeRefreshEnvironment(
+  sourceEnvironment: NodeJS.ProcessEnv,
+  kimiCodeHome: string,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(sourceEnvironment)) {
+    if (value !== undefined && !SENSITIVE_ENVIRONMENT_NAME.test(name)) {
+      sanitized[name] = value;
+    }
+  }
+  sanitized.HOME = homedir();
+  sanitized.KIMI_CODE_HOME = kimiCodeHome;
+  sanitized.NO_COLOR = "1";
+  return sanitized;
+}
+
 /** Pure read-only parse of Kimi Code's local OAuth credential; refresh material is ignored. */
 export function parseKimiCodeCredentialPayload(raw: string): KimiCodeCredentialResult {
   const parsed = parseJsonRecord(raw);
@@ -221,6 +280,29 @@ async function execFileText(command: string, args: readonly string[]): Promise<s
       }
       resolve(stdout);
     });
+  });
+}
+
+async function runKimiCodeRefreshCommand(input: KimiCodeRefreshCommand): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      input.command,
+      [...input.args],
+      {
+        cwd: input.cwd,
+        encoding: "utf8",
+        env: input.env,
+        maxBuffer: input.maxBufferBytes,
+        timeout: input.timeoutMs,
+      },
+      (error) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve();
+      },
+    );
   });
 }
 

@@ -144,6 +144,7 @@ export interface UsageProviderLocalSourceReaders {
   };
   readonly kimiCode?: {
     readonly readCredential: () => Promise<KimiCodeCredentialResult>;
+    readonly refreshCredential?: () => Promise<void>;
   };
 }
 
