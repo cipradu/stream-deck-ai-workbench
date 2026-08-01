@@ -2,7 +2,7 @@ import type { HttpClient as PlatformHttpClient } from "@effect/platform";
 import { Clock, Effect, Option, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
-import { MissingCredentials } from "@ai-workbench/errors";
+import { MissingCredentials, UnauthorizedExpired } from "@ai-workbench/errors";
 import { DEFAULT_HTTP_TIMEOUT_MS, type JsonResponseClassifier } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 import type { GovernorBlocked, SchedulerFetchRequest } from "@ai-workbench/scheduler";
@@ -250,11 +250,15 @@ export function createClaudeCodeUsageSourceOperation(
         catch: () => credentialReadRejected(),
       }).pipe(Effect.map(normalizeCredentialRead));
 
+      // ONE `now` snapshot governs BOTH expiry checks below, so the re-read decision and the
+      // fail-fast decision cannot straddle a clock tick (and stay deterministic under TestClock).
+      const nowMs = now?.() ?? (yield* Clock.currentTimeMillis);
+
       // Proactive stale-`expiresAt` re-read BEFORE the first call. Shares the single re-read
       // budget with the 401 refresh below; a stale re-read spends the budget (`reRead`).
       let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
       let reRead = false;
-      if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= (now?.() ?? (yield* Clock.currentTimeMillis))) {
+      if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
         credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
         reRead = true;
       }
@@ -262,6 +266,19 @@ export function createClaudeCodeUsageSourceOperation(
         return yield* Effect.fail<AdapterFetchFailure>({
           failure: missingCredentialsFetchFailure(credential.reasonCode).failure,
         });
+      }
+
+      // FAIL FAST on a known-dead token. The re-read above did not produce a live credential, so
+      // the local token is genuinely expired and only the Claude Code CLI can mint a new one —
+      // re-reading the Keychain cannot refresh anything. Sending it would be a GUARANTEED 401 that
+      // still spends provider rate-limit budget; enough of those trip a real 429 whose governor
+      // cooldown then blocks the very re-read/retry that would have recovered, which is how a
+      // ~4h credential gap once became a 27h dead key. So this resolves WITHOUT an HTTP call:
+      // the key reads AUTH REQUIRED, no rate-limit budget burns, and because `unauthorized-expired`
+      // is the `credential-settings-refresh` retry class (NO back-off armed) the normal poll
+      // cadence keeps running and recovers by itself the moment the CLI writes a fresh token.
+      if (credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
+        return yield* Effect.fail(credentialExpiredLocally()).pipe(Effect.mapError(schedulerFailureFromTagged));
       }
 
       const attempt = (token: Redacted.Redacted<string>) =>
@@ -383,6 +400,20 @@ function claudeCodeHeaders(token: Redacted.Redacted<string>): Readonly<Record<st
  */
 function missingCredentialsError(reasonCode: ClaudeCodeCredentialReasonCode): MissingCredentials {
   return new MissingCredentials({ reasonCode, boundary: CREDENTIAL_BOUNDARY, providerFailureClass: "credentials" });
+}
+
+/**
+ * A locally-detected expired access token, expressed as the same `UnauthorizedExpired` tagged error
+ * the HTTP 401 path produces — so the key renders the identical `AUTH REQUIRED` state whether the
+ * expiry is caught locally or reported by the provider. Emitted only after the single re-read failed
+ * to yield a live token, and deliberately WITHOUT an HTTP call. No cause and no token cross.
+ */
+function credentialExpiredLocally(): UnauthorizedExpired {
+  return new UnauthorizedExpired({
+    reasonCode: "claude-code-credential-expired",
+    boundary: CREDENTIAL_BOUNDARY,
+    providerFailureClass: "credentials",
+  });
 }
 
 /**

@@ -1473,6 +1473,34 @@ describe("claude-code Effect-native usage adapter", () => {
     });
   });
 
+  it("fails fast with unauthorized-expired when the re-read token is ALSO expired, issuing no HTTP request", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    let reads = 0;
+    const runFetch = claudeCodeEffectSourceFetch(
+      captured,
+      respondJson(200, { five_hour: { utilization: 42 } }),
+      // now() is 2_000; BOTH reads return an already-expired token (expiresAt 1_000). This is the
+      // real steady state while the Claude Code CLI is not running: only the CLI can mint a new
+      // token, so re-reading the Keychain returns the same dead credential.
+      async (): Promise<ClaudeCodeCredentialResult> => {
+        reads += 1;
+        return { ok: true, accessToken: "fixture-expired-token", expiresAt: 1_000 };
+      },
+    );
+
+    const result = await runFetch(usageRequest("claude-code", "five-hour"));
+
+    // Initial read + the single re-read = 2 reads, then STOP. A known-dead token must never reach
+    // the provider: it would be a guaranteed 401 that still spends provider rate-limit budget, and
+    // enough of those trip a 429 whose governor cooldown blocks the recovery path itself.
+    expect(reads).toBe(2);
+    expect(captured).toHaveLength(0);
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { category: "unauthorized-expired", displayState: "unauthorized-expired" },
+    });
+  });
+
   it("re-reads the credential once and retries exactly once with the fresh token after a 401", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const readTokens = ["fixture-stale-token", "fixture-fresh-token"];
