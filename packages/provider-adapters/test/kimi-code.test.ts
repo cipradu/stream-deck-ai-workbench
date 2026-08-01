@@ -55,6 +55,7 @@ const response: KimiCodeUsageResponse = {
     },
   ],
   boosterWallet: {
+    status: "STATUS_ACTIVE",
     monthlyUsed: { currency: "USD", priceInCents: "125" },
     monthlyChargeLimit: { currency: "USD", priceInCents: "10000" },
   },
@@ -111,11 +112,39 @@ describe("Kimi Code usage projections", () => {
     });
   });
 
+  it("renders a present STATUS_DISABLED booster wallet as Off without money", async () => {
+    const snapshot = await Effect.runPromise(
+      projectKimiCodeUsageResponse(
+        {
+          boosterWallet: {
+            status: "STATUS_DISABLED",
+            monthlyUsed: { currency: "USD", priceInCents: "0" },
+            allowTopup: true,
+          },
+        },
+        request("extra-usage"),
+        () => NOW_MS,
+      ),
+    );
+
+    expect(snapshot).toMatchObject({
+      providerId: "kimi-code",
+      metricKind: "usage-spend",
+      spendState: "off",
+      autoReloadOn: false,
+      value: 0,
+    });
+    expect(snapshot).not.toHaveProperty("spendDisplay");
+    expect(snapshot).not.toHaveProperty("usedMinor");
+    expect(snapshot).not.toHaveProperty("currency");
+  });
+
   it("treats an enabled wallet with an omitted zero used scalar as active zero-dollar spend without a cap", async () => {
     const snapshot = await Effect.runPromise(
       projectKimiCodeUsageResponse(
         {
           boosterWallet: {
+            status: "STATUS_ACTIVE",
             monthlyUsed: { currency: "USD" },
             monthlyChargeLimit: { currency: "USD", priceInCents: "10000" },
           },
@@ -136,16 +165,34 @@ describe("Kimi Code usage projections", () => {
     expect(snapshot).not.toHaveProperty("capMinor");
   });
 
+  it("returns category-local no-data for a present wallet with a missing or unknown status", async () => {
+    for (const boosterWallet of [
+      { monthlyUsed: { currency: "USD", priceInCents: "0" } },
+      { status: "STATUS_PAUSED", monthlyUsed: { currency: "USD", priceInCents: "0" } },
+    ]) {
+      const result = await Effect.runPromise(
+        Effect.either(projectKimiCodeUsageResponse({ boosterWallet }, request("extra-usage"), () => NOW_MS)),
+      );
+
+      expect(result).toMatchObject({
+        _tag: "Left",
+        left: { failure: { diagnostics: { reasonCode: "usage-kimi-extra-usage-not-returned" } } },
+      });
+    }
+  });
+
   it("ignores the configurable monthly charge limit and rejects malformed monthly-used money", async () => {
     const cases: readonly KimiCodeUsageResponse[] = [
       {
         boosterWallet: {
+          status: "STATUS_ACTIVE",
           monthlyUsed: { currency: "USD", priceInCents: "125" },
           monthlyChargeLimit: { currency: "CAD", priceInCents: "0" },
         },
       },
       {
         boosterWallet: {
+          status: "STATUS_ACTIVE",
           monthlyUsed: { currency: "USD", priceInCents: "invalid" },
         },
       },

@@ -51,6 +51,7 @@ const KimiCodeMoneySchema = Schema.Struct({
 });
 
 const KimiCodeBoosterWalletSchema = Schema.Struct({
+  status: Schema.optional(Schema.Unknown),
   monthlyUsed: Schema.optional(Schema.Unknown),
 });
 
@@ -201,6 +202,15 @@ export function projectKimiCodeUsageResponse(
       if (body.boosterWallet === undefined) {
         return kimiCodeSpendOffSnapshot(fetchedAtEpochMs);
       }
+      const walletStatus = boosterWalletStatusForResponse(body.boosterWallet);
+      if (walletStatus === "disabled") {
+        return kimiCodeSpendOffSnapshot(fetchedAtEpochMs);
+      }
+      if (walletStatus !== "active") {
+        return yield* Effect.fail<AdapterFetchFailure>({
+          failure: noSourceConfigured("usage-kimi-extra-usage-not-returned").failure,
+        });
+      }
       const spend = spendValuesForResponse(body.boosterWallet);
       if (spend === undefined) {
         return yield* Effect.fail<AdapterFetchFailure>({
@@ -337,6 +347,15 @@ function percentageValues(raw: unknown): PercentageValues | undefined {
     value,
     ...(Number.isFinite(parsedReset) && parsedReset > 0 ? { resetsAtEpochMs: parsedReset } : {}),
   };
+}
+
+function boosterWalletStatusForResponse(rawWallet: unknown): "active" | "disabled" | undefined {
+  const wallet = Option.getOrUndefined(decodeBoosterWallet(rawWallet));
+  return wallet?.status === "STATUS_ACTIVE"
+    ? "active"
+    : wallet?.status === "STATUS_DISABLED"
+      ? "disabled"
+      : undefined;
 }
 
 function spendValuesForResponse(rawWallet: unknown): {
