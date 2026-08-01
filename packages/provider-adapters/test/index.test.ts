@@ -310,11 +310,13 @@ function anthropicCostReportBody(overrides?: Record<string, unknown>): unknown {
   };
 }
 
-function anthropicEffectAdapterInput(): Parameters<typeof anthropicApiBalanceProviderModule.createSourceFetchEffect>[0] {
+function anthropicEffectAdapterInput(
+  nowMs = Date.UTC(2026, 6, 15),
+): Parameters<typeof anthropicApiBalanceProviderModule.createSourceFetchEffect>[0] {
   return {
     providerId: "anthropic-api",    baseUrl: "https://api.anthropic.com",
     resolveCredential: async () => ({ ok: true, value: { value: Redacted.make(ANTHROPIC_SECRET) } }),
-    now: () => Date.UTC(2026, 6, 15),
+    now: () => nowMs,
   };
 }
 
@@ -523,8 +525,9 @@ function anthropicEffectSourceFetch(
   captured: HttpClientRequest.HttpClientRequest[],
   execute: FakeExecute,
   attemptContext?: ProviderAdapterAttemptContext,
+  nowMs?: number,
 ) {
-  const effectFetch = anthropicApiBalanceProviderModule.createSourceFetchEffect(anthropicEffectAdapterInput());
+  const effectFetch = anthropicApiBalanceProviderModule.createSourceFetchEffect(anthropicEffectAdapterInput(nowMs));
   return bridgeEffectSchedulerFetch(
     attemptContext === undefined
       ? effectFetch
@@ -534,6 +537,113 @@ function anthropicEffectSourceFetch(
 }
 
 describe("anthropic-api Effect-native adapter", () => {
+  it("returns zero for the first UTC day without an Anthropic request", async () => {
+    const nowMs = Date.UTC(2026, 7, 1, 12);
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const permits: string[] = [];
+    const attemptContext = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          permits.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+    const runFetch = anthropicEffectSourceFetch(
+      captured,
+      respondJson(400, { error: "invalid request" }),
+      attemptContext,
+      nowMs,
+    );
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        providerId: "anthropic-api",
+        metricKind: "current-month-spend",
+        value: 0,
+        fetchedAtEpochMs: nowMs,
+        dataThroughEpochMs: monthStartEpochMs(nowMs),
+      },
+    });
+    expect(captured).toHaveLength(0);
+    expect(permits).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain(ANTHROPIC_SECRET);
+  });
+
+  it("keeps the zero-without-request behavior through the final millisecond of the first UTC day", async () => {
+    const nowMs = Date.UTC(2026, 7, 1, 23, 59, 59, 999);
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const permits: string[] = [];
+    const attemptContext = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          permits.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+    const runFetch = anthropicEffectSourceFetch(
+      captured,
+      respondJson(400, { error: "invalid request" }),
+      attemptContext,
+      nowMs,
+    );
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        value: 0,
+        fetchedAtEpochMs: nowMs,
+        dataThroughEpochMs: monthStartEpochMs(nowMs),
+      },
+    });
+    expect(captured).toHaveLength(0);
+    expect(permits).toHaveLength(0);
+  });
+
+  it("resumes the normal Anthropic request path at UTC day two midnight", async () => {
+    const nowMs = Date.UTC(2026, 7, 2);
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const permits: string[] = [];
+    const attemptContext = {
+      attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+        Effect.sync(() => {
+          permits.push("permit");
+        }).pipe(Effect.zipRight(operation)),
+      reportRateLimit: () => Effect.void,
+    } satisfies ProviderAdapterAttemptContext;
+    const response = anthropicCostReportBody({
+      data: [
+        {
+          starting_at: "2026-08-01T00:00:00Z",
+          ending_at: "2026-08-02T00:00:00Z",
+          results: [
+            { amount: "125", currency: "USD" },
+            { amount: "50", currency: "USD" },
+          ],
+        },
+      ],
+    });
+    const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, response), attemptContext, nowMs);
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: {
+        value: 1.75,
+        fetchedAtEpochMs: nowMs,
+        dataThroughEpochMs: Date.UTC(2026, 7, 2),
+      },
+    });
+    expect(captured).toHaveLength(1);
+    expect(permits).toEqual(["permit"]);
+    expect(captured[0]!.urlParams).toContainEqual(["starting_at", "2026-08-01T00:00:00Z"]);
+  });
+
   it("fetches and decodes the vendor body at the source via the central one-read decoder into a normalized snapshot", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostReportBody()));

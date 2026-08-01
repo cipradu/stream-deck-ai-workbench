@@ -8,6 +8,7 @@ import {
   balanceSnapshotResult,
   hasNonEmptyPageToken,
   monthStartDateString,
+  monthStartEpochMs,
   numberFromProviderValue,
   parseBalanceResponse,
   sum,
@@ -27,6 +28,10 @@ import type {
 const providerId = "anthropic-api" as const;
 const anthropicVersion = "2023-06-01";
 const maxPages = 64;
+
+function isFirstUtcDayOfMonth(epochMs: number): boolean {
+  return new Date(epochMs).getUTCDate() === 1;
+}
 
 const AnthropicCostReportResponseSchema = Schema.Struct({
   data: Schema.Array(
@@ -60,6 +65,14 @@ export const anthropicApiBalanceProviderModule = {
     return createBalanceSourceFetchEffect(input, {
       fetchBody: (credential, { baseUrl, signal, fetchedAtEpochMs }) =>
         Effect.gen(function* () {
+          if (isFirstUtcDayOfMonth(fetchedAtEpochMs)) {
+            return {
+              data: [],
+              has_more: false,
+              next_page: null,
+            };
+          }
+
           // The SINGLE `Redacted.value` unwrap for this adapter: the request-builder secret read.
           const apiKey = Redacted.value(credential.value);
 
@@ -126,8 +139,13 @@ export const anthropicApiBalanceProviderModule = {
       const endMs = bucket.ending_at === undefined ? Number.NaN : Date.parse(bucket.ending_at);
       return Number.isFinite(endMs) && (latest === undefined || endMs > latest) ? endMs : latest;
     }, undefined);
+    const dataThroughEpochMs =
+      lastEndingAt ??
+      (parsed.value.data.length === 0 && isFirstUtcDayOfMonth(input.fetchedAtEpochMs)
+        ? monthStartEpochMs(input.fetchedAtEpochMs)
+        : undefined);
     return balanceSnapshotResult(input, lowestUnitValue / 100, currencyCode, {
-      ...(lastEndingAt === undefined ? {} : { dataThroughEpochMs: lastEndingAt }),
+      ...(dataThroughEpochMs === undefined ? {} : { dataThroughEpochMs }),
     });
   },
 } as const;
