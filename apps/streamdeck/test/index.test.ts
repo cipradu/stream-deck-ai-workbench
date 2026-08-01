@@ -43,6 +43,7 @@ import {
   parseKimiCodeCredentialPayload,
   parseLastRateLimitsLine,
   readKimiCodeCredential,
+  refreshClaudeCodeCredential,
   refreshKimiCodeCredential,
 } from "../src/local-usage-sources.js";
 import {
@@ -2004,6 +2005,47 @@ describe("local usage source parsing (read-only stores)", () => {
       }
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("runs Claude refresh through Haiku with low effort and isolated bounded process options", async () => {
+    let isolatedRoot: string | undefined;
+    await refreshClaudeCodeCredential(async (command) => {
+      isolatedRoot = command.cwd;
+      expect(command.command).toBe(join(homedir(), ".local", "bin", "claude"));
+      expect(command.args).toEqual([
+        "--safe-mode",
+        "--print",
+        "Reply exactly OK. Do not use tools.",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--max-budget-usd",
+        "0.05",
+        "--model",
+        "haiku",
+        "--effort",
+        "low",
+        "--output-format",
+        "text",
+      ]);
+      expect(command.cwd).toMatch(/ai-workbench-claude-refresh-/);
+      expect(command.timeoutMs).toBe(60_000);
+      expect(command.maxBufferBytes).toBe(16 * 1024);
+      expect(command.env).toMatchObject({
+        HOME: homedir(),
+        NO_COLOR: "1",
+        SAFE_RUNTIME_MARKER: "preserved",
+      });
+      expect(command.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+      expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    }, {
+      PATH: "/fixture/system/path",
+      SAFE_RUNTIME_MARKER: "preserved",
+      ANTHROPIC_API_KEY: "fixture-secret-must-not-reach-child",
+      CLAUDE_CODE_OAUTH_TOKEN: "fixture-token-must-not-reach-child",
+    });
+    expect(isolatedRoot).toBeDefined();
+    await expect(readdir(isolatedRoot!)).rejects.toBeDefined();
   });
 });
 

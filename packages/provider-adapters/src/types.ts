@@ -137,6 +137,7 @@ export interface CodexSessionSnapshot {
 export interface UsageProviderLocalSourceReaders {
   readonly claudeCode?: {
     readonly readCredential: () => Promise<ClaudeCodeCredentialResult>;
+    readonly refreshCredential?: () => Promise<void>;
   };
   readonly codex?: {
     readonly readCredential: () => Promise<CodexCredentialResult>;

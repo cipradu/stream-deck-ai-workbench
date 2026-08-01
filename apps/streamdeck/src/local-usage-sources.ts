@@ -12,12 +12,13 @@ import type {
 } from "@ai-workbench/provider-adapters";
 
 const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
+const DEFAULT_CLAUDE_CODE_EXECUTABLE = join(homedir(), ".local", "bin", "claude");
 const DEFAULT_CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
 const DEFAULT_KIMI_CODE_HOME = join(homedir(), ".kimi-code");
-const KIMI_CODE_REFRESH_TIMEOUT_MS = 60_000;
-const KIMI_CODE_REFRESH_MAX_BUFFER_BYTES = 16 * 1024;
-const KIMI_CODE_REFRESH_PROMPT = "Reply exactly OK. Do not use tools.";
+const USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS = 60_000;
+const USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES = 16 * 1024;
+const USAGE_CREDENTIAL_REFRESH_PROMPT = "Reply exactly OK. Do not use tools.";
 const SENSITIVE_ENVIRONMENT_NAME = /(account|auth|cookie|credential|key|org|password|project|secret|session|team|token)/i;
 const CODEX_SESSION_TAIL_BYTES = 128 * 1024;
 const CODEX_USAGE_WINDOW_DURATIONS = {
@@ -38,7 +39,7 @@ interface ParsedCodexSessionWindow {
   readonly resetsAtEpochMs?: number;
 }
 
-export interface KimiCodeRefreshCommand {
+export interface UsageCredentialRefreshCommand {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
@@ -47,12 +48,17 @@ export interface KimiCodeRefreshCommand {
   readonly maxBufferBytes: number;
 }
 
-export type KimiCodeRefreshCommandRunner = (command: KimiCodeRefreshCommand) => Promise<void>;
+export type UsageCredentialRefreshCommandRunner = (command: UsageCredentialRefreshCommand) => Promise<void>;
+export type KimiCodeRefreshCommand = UsageCredentialRefreshCommand;
+export type KimiCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
+export type ClaudeCodeRefreshCommand = UsageCredentialRefreshCommand;
+export type ClaudeCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
   return {
     claudeCode: {
       readCredential: () => readClaudeCodeKeychainCredential(),
+      refreshCredential: () => refreshClaudeCodeCredential(),
     },
     codex: {
       readCredential: () => readCodexAuthJsonCredential(),
@@ -79,6 +85,40 @@ export async function readClaudeCodeKeychainCredential(
   }
 
   return parseClaudeCodeKeychainPayload(stdout);
+}
+
+export async function refreshClaudeCodeCredential(
+  runCommand: ClaudeCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-claude-refresh-"));
+  try {
+    await runCommand({
+      command: DEFAULT_CLAUDE_CODE_EXECUTABLE,
+      args: [
+        "--safe-mode",
+        "--print",
+        USAGE_CREDENTIAL_REFRESH_PROMPT,
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--max-budget-usd",
+        "0.05",
+        "--model",
+        "haiku",
+        "--effort",
+        "low",
+        "--output-format",
+        "text",
+      ],
+      cwd: isolatedRoot,
+      env: sanitizedUsageRefreshEnvironment(sourceEnvironment),
+      timeoutMs: USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS,
+      maxBufferBytes: USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES,
+    });
+  } finally {
+    await rm(isolatedRoot, { recursive: true, force: true });
+  }
 }
 
 /** Pure parse of the Keychain payload (`.claudeAiOauth.{accessToken, expiresAt}`); never logs contents. */
@@ -166,7 +206,7 @@ export async function readKimiCodeCredential(): Promise<KimiCodeCredentialResult
 }
 
 export async function refreshKimiCodeCredential(
-  runCommand: KimiCodeRefreshCommandRunner = runKimiCodeRefreshCommand,
+  runCommand: KimiCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const kimiCodeHome = sourceEnvironment.KIMI_CODE_HOME?.trim() || DEFAULT_KIMI_CODE_HOME;
@@ -176,25 +216,25 @@ export async function refreshKimiCodeCredential(
       command: join(kimiCodeHome, "bin", "kimi"),
       args: [
         "--prompt",
-        KIMI_CODE_REFRESH_PROMPT,
+        USAGE_CREDENTIAL_REFRESH_PROMPT,
         "--output-format",
         "text",
         "--skills-dir",
         isolatedRoot,
       ],
       cwd: isolatedRoot,
-      env: sanitizedKimiCodeRefreshEnvironment(sourceEnvironment, kimiCodeHome),
-      timeoutMs: KIMI_CODE_REFRESH_TIMEOUT_MS,
-      maxBufferBytes: KIMI_CODE_REFRESH_MAX_BUFFER_BYTES,
+      env: sanitizedUsageRefreshEnvironment(sourceEnvironment, { KIMI_CODE_HOME: kimiCodeHome }),
+      timeoutMs: USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS,
+      maxBufferBytes: USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES,
     });
   } finally {
     await rm(isolatedRoot, { recursive: true, force: true });
   }
 }
 
-function sanitizedKimiCodeRefreshEnvironment(
+function sanitizedUsageRefreshEnvironment(
   sourceEnvironment: NodeJS.ProcessEnv,
-  kimiCodeHome: string,
+  additions: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   const sanitized: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(sourceEnvironment)) {
@@ -203,8 +243,8 @@ function sanitizedKimiCodeRefreshEnvironment(
     }
   }
   sanitized.HOME = homedir();
-  sanitized.KIMI_CODE_HOME = kimiCodeHome;
   sanitized.NO_COLOR = "1";
+  Object.assign(sanitized, additions);
   return sanitized;
 }
 
@@ -283,7 +323,7 @@ async function execFileText(command: string, args: readonly string[]): Promise<s
   });
 }
 
-async function runKimiCodeRefreshCommand(input: KimiCodeRefreshCommand): Promise<void> {
+async function runUsageCredentialRefreshCommand(input: UsageCredentialRefreshCommand): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile(
       input.command,

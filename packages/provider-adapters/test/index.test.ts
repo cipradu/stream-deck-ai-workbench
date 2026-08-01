@@ -1151,10 +1151,11 @@ const CLAUDE_CODE_ACCESS_TOKEN = "fixture-claude-access-token-secret-value";
 function claudeCodeEffectAdapterInput(
   readCredential: () => Promise<ClaudeCodeCredentialResult>,
   now: () => number,
+  refreshCredential?: () => Promise<void>,
 ): Parameters<typeof claudeCodeUsageProviderModule.createSourceFetchEffect>[0] {
   return {
     providerId: "claude-code",    baseUrl: "https://api.anthropic.com",
-    localSources: { claudeCode: { readCredential } },
+    localSources: { claudeCode: { readCredential, ...(refreshCredential === undefined ? {} : { refreshCredential }) } },
     // The hybrid adapter reads the local Keychain credential, never `resolveCredential`.
     resolveCredential: () => Promise.reject(new Error("claude-code usage adapter must not use resolveCredential")),
     now,
@@ -1167,8 +1168,11 @@ function claudeCodeEffectSourceFetch(
   readCredential: () => Promise<ClaudeCodeCredentialResult>,
   now: () => number = () => 2_000,
   attemptContext?: ProviderAdapterAttemptContext,
+  refreshCredential?: () => Promise<void>,
 ) {
-  const effectFetch = claudeCodeUsageProviderModule.createSourceFetchEffect(claudeCodeEffectAdapterInput(readCredential, now));
+  const effectFetch = claudeCodeUsageProviderModule.createSourceFetchEffect(
+    claudeCodeEffectAdapterInput(readCredential, now, refreshCredential),
+  );
   return bridgeEffectSchedulerFetch(
     attemptContext === undefined
       ? effectFetch
@@ -1583,9 +1587,39 @@ describe("claude-code Effect-native usage adapter", () => {
     });
   });
 
+  it("runs one CLI-owned recovery for an expired token before rereading and fetching usage", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    let reads = 0;
+    let refreshes = 0;
+    const runFetch = claudeCodeEffectSourceFetch(
+      captured,
+      respondJson(200, { five_hour: { utilization: 42 } }),
+      async () => {
+        reads += 1;
+        return reads === 1
+          ? { ok: true, accessToken: "fixture-expired-token", expiresAt: 1_000 }
+          : { ok: true, accessToken: "fixture-renewed-token", expiresAt: 10_000 };
+      },
+      () => 2_000,
+      undefined,
+      async () => {
+        refreshes += 1;
+      },
+    );
+
+    const result = await runFetch(usageRequest("claude-code", "five-hour"));
+
+    expect(refreshes).toBe(1);
+    expect(reads).toBe(2);
+    expect(captured).toHaveLength(1);
+    expect(result).toMatchObject({ ok: true, snapshot: { value: 42 } });
+    expect(JSON.stringify(result)).not.toContain("fixture-expired-token");
+  });
+
   it("fails fast with unauthorized-expired when the re-read token is ALSO expired, issuing no HTTP request", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     let reads = 0;
+    let refreshes = 0;
     const runFetch = claudeCodeEffectSourceFetch(
       captured,
       respondJson(200, { five_hour: { utilization: 42 } }),
@@ -1596,6 +1630,11 @@ describe("claude-code Effect-native usage adapter", () => {
         reads += 1;
         return { ok: true, accessToken: "fixture-expired-token", expiresAt: 1_000 };
       },
+      () => 2_000,
+      undefined,
+      async () => {
+        refreshes += 1;
+      },
     );
 
     const result = await runFetch(usageRequest("claude-code", "five-hour"));
@@ -1604,6 +1643,7 @@ describe("claude-code Effect-native usage adapter", () => {
     // the provider: it would be a guaranteed 401 that still spends provider rate-limit budget, and
     // enough of those trip a 429 whose governor cooldown blocks the recovery path itself.
     expect(reads).toBe(2);
+    expect(refreshes).toBe(1);
     expect(captured).toHaveLength(0);
     expect(result).toMatchObject({
       ok: false,
@@ -1615,6 +1655,7 @@ describe("claude-code Effect-native usage adapter", () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const readTokens = ["fixture-stale-token", "fixture-fresh-token"];
     let reads = 0;
+    let refreshes = 0;
     const permitEvents: string[] = [];
     const attemptContext = {
       attempt: <A, E, R>(operation: Effect.Effect<A, E, R>) =>
@@ -1636,12 +1677,16 @@ describe("claude-code Effect-native usage adapter", () => {
       },
       () => 2_000,
       attemptContext,
+      async () => {
+        refreshes += 1;
+      },
     );
 
     const result = await runFetch(usageRequest("claude-code", "five-hour"));
 
     // One initial read (token not stale) + one 401-triggered re-read = 2 reads, 2 HTTP calls.
     expect(reads).toBe(2);
+    expect(refreshes).toBe(1);
     expect(captured).toHaveLength(2);
     expect(permitEvents).toEqual(["permit", "permit"]);
     expect(PlatformHeaders.get(captured[1]!.headers, "authorization")).toStrictEqual(

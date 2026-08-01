@@ -226,6 +226,7 @@ export function createClaudeCodeUsageSourceOperation(
   PlatformHttpClient.HttpClient | ProviderAdapterAttemptContext
 > {
   const readCredential = input.localSources?.claudeCode?.readCredential;
+  const refreshCredential = input.localSources?.claudeCode?.refreshCredential;
   if (readCredential === undefined) {
     return () =>
       Effect.fail<AdapterFetchFailure>({
@@ -253,13 +254,32 @@ export function createClaudeCodeUsageSourceOperation(
       // ONE `now` snapshot governs BOTH expiry checks below, so the re-read decision and the
       // fail-fast decision cannot straddle a clock tick (and stay deterministic under TestClock).
       const nowMs = now?.() ?? (yield* Clock.currentTimeMillis);
+      let recoveryAttempted = false;
 
-      // Proactive stale-`expiresAt` re-read BEFORE the first call. Shares the single re-read
-      // budget with the 401 refresh below; a stale re-read spends the budget (`reRead`).
+      const recoverAndRead = Effect.gen(function* () {
+        recoveryAttempted = true;
+        let refreshCompleted = refreshCredential === undefined;
+        if (refreshCredential !== undefined) {
+          refreshCompleted = yield* Effect.tryPromise({
+            try: () => refreshCredential(),
+            catch: () => credentialRefreshRejected(),
+          }).pipe(
+            Effect.match({
+              onFailure: () => false,
+              onSuccess: () => true,
+            }),
+          );
+        }
+        const recoveredCredential = yield* readOnce;
+        return { credential: recoveredCredential, refreshCompleted } as const;
+      });
+
+      // Proactive stale-`expiresAt` recovery BEFORE the first call. The shell callback lets the
+      // Claude CLI refresh its own Keychain item; the adapter then performs one readback.
       let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
       let reRead = false;
       if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
-        credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
+        credential = (yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged))).credential;
         reRead = true;
       }
       if (!credential.ok) {
@@ -268,15 +288,14 @@ export function createClaudeCodeUsageSourceOperation(
         });
       }
 
-      // FAIL FAST on a known-dead token. The re-read above did not produce a live credential, so
-      // the local token is genuinely expired and only the Claude Code CLI can mint a new one —
-      // re-reading the Keychain cannot refresh anything. Sending it would be a GUARANTEED 401 that
+      // FAIL FAST on a known-dead token. The one recovery attempt above did not produce a live
+      // credential. Sending it would be a GUARANTEED 401 that
       // still spends provider rate-limit budget; enough of those trip a real 429 whose governor
       // cooldown then blocks the very re-read/retry that would have recovered, which is how a
       // ~4h credential gap once became a 27h dead key. So this resolves WITHOUT an HTTP call:
       // the key reads AUTH REQUIRED, no rate-limit budget burns, and because `unauthorized-expired`
       // is the `credential-settings-refresh` retry class (NO back-off armed) the normal poll
-      // cadence keeps running and recovers by itself the moment the CLI writes a fresh token.
+      // cadence keeps running and may try one fresh recovery on the next source flight.
       if (credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
         return yield* Effect.fail(credentialExpiredLocally()).pipe(Effect.mapError(schedulerFailureFromTagged));
       }
@@ -294,10 +313,21 @@ export function createClaudeCodeUsageSourceOperation(
         ? attempt(credential.token)
         : attempt(credential.token).pipe(
             Effect.catchTag("UnauthorizedExpired", () =>
-              readOnce.pipe(
-                Effect.flatMap((refreshed) =>
-                  refreshed.ok ? attempt(refreshed.token) : Effect.fail(missingCredentialsError(refreshed.reasonCode)),
-                ),
+              (recoveryAttempted
+                ? readOnce.pipe(Effect.map((credential) => ({ credential, refreshCompleted: false }) as const))
+                : recoverAndRead
+              ).pipe(
+                Effect.flatMap(({ credential: refreshed, refreshCompleted }) => {
+                  if (!refreshCompleted) {
+                    return Effect.fail(credentialExpiredLocally());
+                  }
+                  if (!refreshed.ok) {
+                    return Effect.fail(missingCredentialsError(refreshed.reasonCode));
+                  }
+                  return refreshed.expiresAt !== undefined && refreshed.expiresAt <= nowMs
+                    ? Effect.fail(credentialExpiredLocally())
+                    : attempt(refreshed.token);
+                }),
               ),
             ),
           );
@@ -423,6 +453,14 @@ function credentialExpiredLocally(): UnauthorizedExpired {
 function credentialReadRejected(): MissingCredentials {
   return new MissingCredentials({
     reasonCode: "claude-code-credential-read-failed",
+    boundary: CREDENTIAL_BOUNDARY,
+    providerFailureClass: "credentials",
+  });
+}
+
+function credentialRefreshRejected(): UnauthorizedExpired {
+  return new UnauthorizedExpired({
+    reasonCode: "claude-code-credential-refresh-failed",
     boundary: CREDENTIAL_BOUNDARY,
     providerFailureClass: "credentials",
   });
