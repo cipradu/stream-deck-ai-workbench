@@ -2417,6 +2417,72 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     expect(rendered).toContain('data-part="gauge-fill"');
   });
 
+  it("expires a retained Kimi five-hour value at its reset deadline while preserving NO DATA", () => {
+    const now = 1_700_000_000_000;
+    const resetsAtEpochMs = now + 60_000;
+    const retainedUsage = {
+      displayState: "stale",
+      failureContext: {
+        category: "no-data-yet",
+        displayState: "no-data-yet",
+        reasonCode: "usage-kimi-five-hour-not-returned",
+        retryClass: "healthy-poll",
+        safePublicMessage: "No provider data is available yet.",
+      },
+      failureIndicator: "NO DATA",
+      fetchedAtEpochMs: now - 600_000,
+      freshness: "stale",
+      headerLabel: "Kimi Code · 5h",
+      progressPercent: 1,
+      providerId: "kimi-code",
+      rendererSeverityState: "normal",
+      resetsAtEpochMs,
+      severity: "healthy",
+      stale: true,
+      staleReason: "refresh-failed",
+      usageWindow: "five-hour",
+      valueLabel: "remaining",
+      valueText: "99%",
+    } as DisplayRendererInput & { readonly usageWindow: "five-hour" };
+
+    const beforeReset = decodeURIComponent(renderDisplayInput(retainedUsage, now).image);
+    expect(beforeReset).toContain(">99%</text>");
+    expect(beforeReset).toContain('data-part="gauge-fill" x="16" y="101" width="1.1"');
+    expect(beforeReset).toContain(">NO DATA</text>");
+    expect(beforeReset).toContain("1m");
+
+    const atReset = decodeURIComponent(renderDisplayInput(retainedUsage, resetsAtEpochMs).image);
+    expect(atReset).toContain(">100%</text>");
+    expect(atReset).toContain('data-part="gauge-fill" x="16" y="101" width="0.0"');
+    expect(atReset).toContain(">NO DATA</text>");
+    expect(atReset).toContain("reset passed");
+
+    const usedAtReset = decodeURIComponent(
+      renderDisplayInput({ ...retainedUsage, valueLabel: "used", valueText: "1%" }, resetsAtEpochMs).image,
+    );
+    expect(usedAtReset).toContain(">0%</text>");
+    expect(usedAtReset).toContain('data-part="gauge-fill" x="16" y="101" width="0.0"');
+
+    for (const nonTarget of [
+      { ...retainedUsage, usageWindow: "seven-day" as const },
+      {
+        ...retainedUsage,
+        failureContext: {
+          category: "rate-limited" as const,
+          displayState: "rate-limited" as const,
+          reasonCode: "kimi-five-hour-rate-limited",
+          retryClass: "rate-limit-backoff" as const,
+          safePublicMessage: "Provider rate limit reached.",
+        },
+        failureIndicator: "RATE LIMITED" as const,
+      },
+    ]) {
+      const rendered = decodeURIComponent(renderDisplayInput(nonTarget, resetsAtEpochMs).image);
+      expect(rendered).toContain(">99%</text>");
+      expect(rendered).toContain('data-part="gauge-fill" x="16" y="101" width="1.1"');
+    }
+  });
+
   it.each([
     ["HTTP 401", "AUTH REQUIRED"],
     ["HTTP 403", "ACCESS DENIED"],

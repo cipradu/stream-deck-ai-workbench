@@ -96,8 +96,10 @@ export function displayInputFromFailure(failure: SanitizedFailure): DisplayRende
 function usageBody(input: DisplayRendererInput, now: number): string {
   const modeLabel = input.valueLabel === "remaining" ? "left" : "used";
   const color = severityColorFor(input);
-  const progress = clampPercent(input.progressPercent ?? 0);
+  const expiredKimiFiveHour = shouldDefaultExpiredKimiFiveHour(input, now);
+  const progress = expiredKimiFiveHour ? 0 : clampPercent(input.progressPercent ?? 0);
   const fillWidth = ((GAUGE_TRACK_WIDTH * progress) / 100).toFixed(1);
+  const valueText = expiredKimiFiveHour ? (input.valueLabel === "remaining" ? "100%" : "0%") : input.valueText;
 
   const reset = formatTimeToReset(input.resetsAtEpochMs, now);
   const resetLine =
@@ -117,12 +119,24 @@ function usageBody(input: DisplayRendererInput, now: number): string {
 
   return [
     staleTopRow(input, now),
-    `<text data-part="key-value" x="72" y="76" text-anchor="middle" font-family="sans-serif" font-size="40" font-weight="bold" fill="${keyColors.text}">${escapeXml(input.valueText)}</text>`,
+    `<text data-part="key-value" x="72" y="76" text-anchor="middle" font-family="sans-serif" font-size="40" font-weight="bold" fill="${keyColors.text}">${escapeXml(valueText)}</text>`,
     `<text data-part="value-context" x="72" y="93" text-anchor="middle" font-family="sans-serif" font-size="13" fill="${keyColors.dim}">${escapeXml(modeLabel)}</text>`,
     `<rect x="${GAUGE_X}" y="101" width="${GAUGE_TRACK_WIDTH}" height="10" rx="5" fill="${keyColors.track}"/>`,
     `<rect data-part="gauge-fill" x="${GAUGE_X}" y="101" width="${fillWidth}" height="10" rx="5" fill="${color}"/>`,
     bottomLine,
   ].join("");
+}
+
+function shouldDefaultExpiredKimiFiveHour(input: DisplayRendererInput, now: number): boolean {
+  return (
+    input.providerId === "kimi-code" &&
+    input.usageWindow === "five-hour" &&
+    input.freshness === "stale" &&
+    input.staleReason === "refresh-failed" &&
+    input.failureContext?.category === "no-data-yet" &&
+    input.resetsAtEpochMs !== undefined &&
+    now >= input.resetsAtEpochMs
+  );
 }
 
 // ---------------------------------------------------------------------------

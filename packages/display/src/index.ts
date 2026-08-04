@@ -11,6 +11,7 @@ import {
   type SeverityThresholdBasis,
   type SeverityThresholdSet,
   type SnapshotCoverage,
+  type UsageWindowId,
 } from "@ai-workbench/contracts";
 import {
   findProviderEntry,
@@ -205,6 +206,8 @@ export interface DisplayRendererInput extends RendererInput {
   readonly providerId?: string;
   /** Action family so degraded output can keep family-specific copy. */
   readonly actionFamilyId?: "balance" | "usage";
+  /** Rolling Usage window carried into presentation-only rendering decisions. */
+  readonly usageWindow?: UsageWindowId;
   /** True when the snapshot came from a read-only local fallback source; renderers keep the old stale-badge honesty. */
   readonly sourceFallback?: boolean;
 }
@@ -516,6 +519,9 @@ export function buildRendererInput(input: BuildRendererInputOptions): DisplayRen
     ...(authExpiredHint === undefined ? {} : { authExpiredHint }),
     providerId: input.providerId ?? snapshot.providerId,
     actionFamilyId: input.actionFamilyId ?? snapshot.familyId,
+    ...(snapshot.familyId === "usage" && snapshot.coverage.kind === "rolling-window"
+      ? { usageWindow: snapshot.coverage.window }
+      : {}),
     ...(snapshot.source === "local-fallback" ? { sourceFallback: true } : {}),
   };
 }

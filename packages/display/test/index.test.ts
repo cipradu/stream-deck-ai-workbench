@@ -369,6 +369,7 @@ describe("display basis, value formatting, and coverage markers", () => {
       valueText: "25%",
       valueLabel: "remaining",
       progressPercent: 75,
+      usageWindow: "five-hour",
       severity: "warning",
       rendererSeverityState: "warning",
       stale: false,
