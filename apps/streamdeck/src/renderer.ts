@@ -96,10 +96,10 @@ export function displayInputFromFailure(failure: SanitizedFailure): DisplayRende
 function usageBody(input: DisplayRendererInput, now: number): string {
   const modeLabel = input.valueLabel === "remaining" ? "left" : "used";
   const color = severityColorFor(input);
-  const expiredKimiFiveHour = shouldDefaultExpiredKimiFiveHour(input, now);
-  const progress = expiredKimiFiveHour ? 0 : clampPercent(input.progressPercent ?? 0);
+  const expiredKimiRollingWindow = shouldDefaultExpiredKimiRollingWindow(input, now);
+  const progress = expiredKimiRollingWindow ? 0 : clampPercent(input.progressPercent ?? 0);
   const fillWidth = ((GAUGE_TRACK_WIDTH * progress) / 100).toFixed(1);
-  const valueText = expiredKimiFiveHour ? (input.valueLabel === "remaining" ? "100%" : "0%") : input.valueText;
+  const valueText = expiredKimiRollingWindow ? (input.valueLabel === "remaining" ? "100%" : "0%") : input.valueText;
 
   const reset = formatTimeToReset(input.resetsAtEpochMs, now);
   const resetLine =
@@ -127,10 +127,10 @@ function usageBody(input: DisplayRendererInput, now: number): string {
   ].join("");
 }
 
-function shouldDefaultExpiredKimiFiveHour(input: DisplayRendererInput, now: number): boolean {
+function shouldDefaultExpiredKimiRollingWindow(input: DisplayRendererInput, now: number): boolean {
   return (
     input.providerId === "kimi-code" &&
-    input.usageWindow === "five-hour" &&
+    (input.usageWindow === "five-hour" || input.usageWindow === "seven-day") &&
     input.freshness === "stale" &&
     input.staleReason === "refresh-failed" &&
     input.failureContext?.category === "no-data-yet" &&
