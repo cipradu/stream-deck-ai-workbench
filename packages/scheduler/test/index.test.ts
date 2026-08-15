@@ -7,10 +7,11 @@ import {
   type NormalizedSnapshot,
   type SchedulerKeyParts,
   type SourceRequestIdentityInput,
+  type StatusSnapshot,
 } from "@ai-workbench/contracts";
 import { createSanitizedFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import type { ActionSettingsChangeClassification, GlobalSettingsChangeClassification } from "@ai-workbench/settings";
-import { Clock, Deferred, Duration, Effect, Layer, ManagedRuntime, Random, Ref, TestClock, TestContext } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, FiberStatus, Layer, ManagedRuntime, Random, Ref, TestClock, TestContext } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -357,6 +358,128 @@ describe("per-key state: stale-at-read and expiry", () => {
 
     await scheduler.shutdown();
   });
+
+  it.each([
+    {
+      label: "none with a warning incident axis",
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 1,
+        highestImpact: "minor",
+        providerStatusIndicator: "none",
+        fetchedAtEpochMs: 0,
+      } satisfies StatusSnapshot,
+    },
+    {
+      label: "maintenance without active incidents",
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 0,
+        providerStatusIndicator: "maintenance",
+        fetchedAtEpochMs: 0,
+      } satisfies StatusSnapshot,
+    },
+    {
+      label: "minor without active incidents",
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 0,
+        providerStatusIndicator: "minor",
+        fetchedAtEpochMs: 0,
+      } satisfies StatusSnapshot,
+    },
+    {
+      label: "major with a lower incident axis",
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 1,
+        highestImpact: "none",
+        providerStatusIndicator: "major",
+        fetchedAtEpochMs: 0,
+      } satisfies StatusSnapshot,
+    },
+    {
+      label: "critical with a critical incident axis",
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 1,
+        highestImpact: "critical",
+        providerStatusIndicator: "critical",
+        fetchedAtEpochMs: 0,
+      } satisfies StatusSnapshot,
+    },
+  ])("retains exact OpenAI $label through failed refresh and removes it at 86,400,001 ms", async ({ snapshot: statusSnapshot }) => {
+    const runtime = makeTestRuntime();
+    const statusKeyParts: SchedulerKeyParts = {
+      familyId: "status",
+      providerId: "openai-api",
+      credentialProfileId: "none",
+    };
+    const statusKey = serializeSchedulerKey(statusKeyParts);
+    let calls = 0;
+    const statusFetch: SchedulerEffectFetch = () => {
+      calls += 1;
+      return calls === 1
+        ? Effect.succeed(statusSnapshot)
+        : Effect.fail({ failure: failure("validation-drift", "response-json-schema-mismatch") });
+    };
+    const scheduler = createScheduler({ runtime });
+
+    try {
+      scheduler.activate({
+        instanceId: `status-${statusSnapshot.providerStatusIndicator}`,
+        keyParts: statusKeyParts,
+        refreshIntervalSeconds: 600,
+        fetch: statusFetch,
+      });
+      await macrotask();
+      expect(scheduler.getOutput(statusKey)).toMatchObject({
+        displayState: "fresh",
+        snapshot: statusSnapshot,
+      });
+
+      await scheduler.refresh(statusKey);
+      await macrotask();
+      const afterFailure = scheduler.getOutput(statusKey);
+      expect(afterFailure).toMatchObject({
+        displayState: "stale",
+        staleReason: "refresh-failed",
+        snapshot: statusSnapshot,
+        failure: {
+          category: "validation-drift",
+          diagnostics: { reasonCode: "response-json-schema-mismatch" },
+        },
+      });
+
+      scheduler.deactivate({
+        schedulerKey: statusKey,
+        instanceId: `status-${statusSnapshot.providerStatusIndicator}`,
+      });
+      await macrotask();
+      await runtime.runPromise(TestClock.adjust(Duration.millis(1_200_001)));
+      expect(scheduler.getOutput(statusKey)).toMatchObject({
+        displayState: "stale",
+        staleReason: "refresh-failed",
+        snapshot: statusSnapshot,
+      });
+
+      await runtime.runPromise(TestClock.adjust(Duration.millis(86_400_000 - 1_200_000)));
+      const expired = scheduler.getOutput(statusKey);
+      expect(expired).toMatchObject({
+        displayState: "no-data-yet",
+        failure: { category: "no-data-yet", diagnostics: { reasonCode: "stale-cache-expired" } },
+      });
+      expect(expired.snapshot).toBeUndefined();
+    } finally {
+      await scheduler.shutdown();
+      await runtime.dispose();
+    }
+  });
 });
 
 describe("single-flight (structural: one fiber per key)", () => {
@@ -428,6 +551,220 @@ describe("interruption on deactivate", () => {
     expect(scheduler.getOutput(key)).toMatchObject({ activeRefCount: 0, inFlight: false });
 
     await scheduler.shutdown();
+  });
+
+  it("shutdown waits for cleanup already pending from final-instance deactivation before downstream teardown", async () => {
+    const runtime = makeTestRuntime();
+    const started = runtime.runSync(Deferred.make<void>());
+    const cleanupStarted = runtime.runSync(Deferred.make<void>());
+    const releaseCleanup = runtime.runSync(Deferred.make<void>());
+    const never = runtime.runSync(Deferred.make<NormalizedSnapshot>());
+    const cleanupCompletions = runtime.runSync(Ref.make(0));
+    const scheduler = createScheduler({ runtime });
+    const hangingFetch: SchedulerEffectFetch = () =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(started, undefined);
+        return yield* Deferred.await(never);
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(cleanupStarted, undefined);
+            yield* Deferred.await(releaseCleanup);
+            yield* Ref.update(cleanupCompletions, (count) => count + 1);
+          }),
+        ),
+      );
+    let shutdown: Promise<void> | undefined;
+
+    try {
+      scheduler.activate({ instanceId: "instance-a", keyParts, refreshIntervalSeconds: 600, fetch: hangingFetch });
+      await runtime.runPromise(Deferred.await(started));
+
+      scheduler.deactivate({ schedulerKey: key, instanceId: "instance-a" });
+      await runtime.runPromise(Deferred.await(cleanupStarted));
+
+      let downstreamTeardownStarted = false;
+      shutdown = scheduler.shutdown().then(() => {
+        downstreamTeardownStarted = true;
+      });
+      const stateBeforeCleanupRelease = await Promise.race([
+        shutdown.then(() => "shutdown-completed" as const),
+        Promise.resolve("cleanup-pending" as const),
+      ]);
+
+      expect(stateBeforeCleanupRelease).toBe("cleanup-pending");
+      expect(downstreamTeardownStarted).toBe(false);
+      expect(runtime.runSync(Ref.get(cleanupCompletions))).toBe(0);
+
+      runtime.runSync(Deferred.succeed(releaseCleanup, undefined));
+      await shutdown;
+
+      expect(downstreamTeardownStarted).toBe(true);
+      expect(runtime.runSync(Ref.get(cleanupCompletions))).toBe(1);
+    } finally {
+      runtime.runSync(Deferred.succeed(releaseCleanup, undefined));
+      await shutdown;
+      await runtime.dispose();
+    }
+  });
+
+  it("concurrent shutdown callers share the pending-cleanup barrier", async () => {
+    const runtime = makeTestRuntime();
+    const started = runtime.runSync(Deferred.make<void>());
+    const cleanupStarted = runtime.runSync(Deferred.make<void>());
+    const releaseCleanup = runtime.runSync(Deferred.make<void>());
+    const never = runtime.runSync(Deferred.make<NormalizedSnapshot>());
+    const cleanupCompletions = runtime.runSync(Ref.make(0));
+    const scheduler = createScheduler({ runtime });
+    const hangingFetch: SchedulerEffectFetch = () =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(started, undefined);
+        return yield* Deferred.await(never);
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(cleanupStarted, undefined);
+            yield* Deferred.await(releaseCleanup);
+            yield* Ref.update(cleanupCompletions, (count) => count + 1);
+          }),
+        ),
+      );
+    let firstShutdown: Promise<void> | undefined;
+    let secondShutdown: Promise<void> | undefined;
+
+    try {
+      scheduler.activate({ instanceId: "instance-a", keyParts, refreshIntervalSeconds: 600, fetch: hangingFetch });
+      await runtime.runPromise(Deferred.await(started));
+
+      scheduler.deactivate({ schedulerKey: key, instanceId: "instance-a" });
+      await runtime.runPromise(Deferred.await(cleanupStarted));
+
+      firstShutdown = scheduler.shutdown();
+      secondShutdown = scheduler.shutdown();
+      let secondShutdownCompleted = false;
+      const secondCompletion = secondShutdown.then(() => {
+        secondShutdownCompleted = true;
+      });
+      await Promise.resolve();
+
+      expect(secondShutdownCompleted).toBe(false);
+      expect(firstShutdown).toBe(secondShutdown);
+      expect(runtime.runSync(Ref.get(cleanupCompletions))).toBe(0);
+
+      runtime.runSync(Deferred.succeed(releaseCleanup, undefined));
+      await Promise.all([firstShutdown, secondCompletion]);
+
+      expect(scheduler.shutdown()).toBe(firstShutdown);
+      expect(runtime.runSync(Ref.get(cleanupCompletions))).toBe(1);
+    } finally {
+      runtime.runSync(Deferred.succeed(releaseCleanup, undefined));
+      await Promise.all([firstShutdown, secondShutdown].filter((shutdown) => shutdown !== undefined));
+      await runtime.dispose();
+    }
+  });
+
+  it("shutdown retains predecessor cleanup after a waiting replacement is deactivated", async () => {
+    const targetRuntime = ManagedRuntime.make(TestContext.TestContext);
+    const forked: Array<Fiber.RuntimeFiber<unknown, unknown>> = [];
+    let nextRunPromiseStarted: (() => void) | undefined;
+    const runtime = new Proxy(targetRuntime, {
+      get(target, property, receiver) {
+        if (property === "runFork") {
+          const runFork: typeof target.runFork = (effect, options) => {
+            const fiber = target.runFork(effect, options);
+            forked.push(fiber);
+            return fiber;
+          };
+          return runFork;
+        }
+        if (property === "runPromise") {
+          const runPromise: typeof target.runPromise = (effect, options) => {
+            const onStarted = nextRunPromiseStarted;
+            nextRunPromiseStarted = undefined;
+            onStarted?.();
+            return target.runPromise(effect, options);
+          };
+          return runPromise;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const startedA = runtime.runSync(Deferred.make<void>());
+    const cleanupStartedA = runtime.runSync(Deferred.make<void>());
+    const releaseCleanupA = runtime.runSync(Deferred.make<void>());
+    const never = runtime.runSync(Deferred.make<NormalizedSnapshot>());
+    const cleanupCompletionsA = runtime.runSync(Ref.make(0));
+    const fetchStarts = runtime.runSync(Ref.make(0));
+    const scheduler = createScheduler({ runtime });
+    const hangingFetch: SchedulerEffectFetch = () =>
+      Effect.gen(function* () {
+        const starts = yield* Ref.updateAndGet(fetchStarts, (count) => count + 1);
+        if (starts === 1) {
+          yield* Deferred.succeed(startedA, undefined);
+        }
+        return yield* Deferred.await(never);
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(cleanupStartedA, undefined);
+            yield* Deferred.await(releaseCleanupA);
+            yield* Ref.update(cleanupCompletionsA, (count) => count + 1);
+          }),
+        ),
+      );
+    let shutdown: Promise<void> | undefined;
+
+    try {
+      scheduler.activate({ instanceId: "instance-a", keyParts, refreshIntervalSeconds: 600, fetch: hangingFetch });
+      await runtime.runPromise(Deferred.await(startedA));
+
+      scheduler.deactivate({ schedulerKey: key, instanceId: "instance-a" });
+      await runtime.runPromise(Deferred.await(cleanupStartedA));
+      expect(runtime.runSync(Ref.get(cleanupCompletionsA))).toBe(0);
+
+      scheduler.activate({ instanceId: "instance-b", keyParts, refreshIntervalSeconds: 600, fetch: hangingFetch });
+      const replacementFiber = forked[2]!;
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          while (true) {
+            const status = yield* Fiber.status(replacementFiber);
+            if (FiberStatus.isSuspended(status)) return;
+            yield* Effect.yieldNow();
+          }
+        }),
+      );
+      expect(runtime.runSync(Ref.get(fetchStarts))).toBe(1);
+      expect(runtime.runSync(Ref.get(cleanupCompletionsA))).toBe(0);
+
+      scheduler.deactivate({ schedulerKey: key, instanceId: "instance-b" });
+      await runtime.runPromise(Fiber.await(replacementFiber));
+      expect(runtime.runSync(Ref.get(cleanupCompletionsA))).toBe(0);
+
+      const shutdownJoinStarted = new Promise<void>((resolve) => {
+        nextRunPromiseStarted = resolve;
+      });
+      shutdown = scheduler.shutdown();
+      await shutdownJoinStarted;
+
+      const settlementProbe = targetRuntime.runFork(
+        Effect.race(
+          Effect.promise(() => shutdown!).pipe(Effect.as("shutdown-completed" as const)),
+          Effect.sleep(Duration.millis(1)).pipe(Effect.as("cleanup-pending" as const)),
+        ),
+      );
+      await targetRuntime.runPromise(TestClock.adjust(Duration.millis(1)));
+      const settlement = await targetRuntime.runPromise(Fiber.join(settlementProbe));
+
+      expect(settlement).toBe("cleanup-pending");
+
+      runtime.runSync(Deferred.succeed(releaseCleanupA, undefined));
+      await shutdown;
+      expect(runtime.runSync(Ref.get(cleanupCompletionsA))).toBe(1);
+    } finally {
+      targetRuntime.runSync(Deferred.succeed(releaseCleanupA, undefined));
+      await shutdown;
+      await targetRuntime.dispose();
+    }
   });
 });
 

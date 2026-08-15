@@ -99,3 +99,7 @@ dist/
 **.scip
 logs/
 .codeindex/
+# Keep the canonical verifier visible as repository source despite local directory excludes
+!/tooling/verification/
+/tooling/verification/*
+!/tooling/verification/unit016-verify.mjs

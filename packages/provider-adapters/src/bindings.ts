@@ -1,11 +1,20 @@
-import { BALANCE_PROVIDER_IDS, USAGE_PROVIDER_IDS, type BalanceProviderId, type UsageProviderId } from "@ai-workbench/contracts";
+import {
+  BALANCE_PROVIDER_IDS,
+  STATUS_PROVIDER_IDS,
+  USAGE_PROVIDER_IDS,
+  type BalanceProviderId,
+  type StatusProviderId,
+  type UsageProviderId,
+} from "@ai-workbench/contracts";
 import { listProviderEntriesForFamily } from "@ai-workbench/provider-registry";
 
 import { balanceProviderModules } from "./providers/balance/index.js";
+import { statusProviderModules } from "./providers/status/index.js";
 import { usageProviderModules } from "./providers/usage/index.js";
 import type {
   BalanceProviderAdapterBinding,
   ProviderAdapterBinding,
+  StatusProviderAdapterBinding,
   UsageProviderAdapterBinding,
 } from "./types.js";
 
@@ -47,10 +56,33 @@ export function listBalanceProviderAdapterBindings(): readonly BalanceProviderAd
   });
 }
 
+export function listStatusProviderAdapterBindings(): readonly StatusProviderAdapterBinding[] {
+  return listProviderEntriesForFamily("status").flatMap((entry) => {
+    const providerId = entry.providerId;
+
+    if (!isStatusProviderId(providerId)) {
+      return [];
+    }
+
+    const providerModule = statusProviderModules.find((candidate) => candidate.providerId === providerId);
+    if (providerModule === undefined) {
+      return [];
+    }
+
+    return entry.capabilities
+      .filter((capability) => capability.actionFamilyId === "status")
+      .map((capability) => providerModule.createBinding(capability));
+  });
+}
+
 export function findProviderAdapterBinding(adapterBindingId: string): ProviderAdapterBinding | undefined {
-  return [...listUsageProviderAdapterBindings(), ...listBalanceProviderAdapterBindings()].find(
+  return [...listUsageProviderAdapterBindings(), ...listBalanceProviderAdapterBindings(), ...listStatusProviderAdapterBindings()].find(
     (binding) => binding.adapterBindingId === adapterBindingId,
   );
+}
+
+function isStatusProviderId(providerId: string): providerId is StatusProviderId {
+  return (STATUS_PROVIDER_IDS as readonly string[]).includes(providerId);
 }
 
 function isUsageProviderId(providerId: string): providerId is UsageProviderId {

@@ -209,6 +209,7 @@ describe("@ai-workbench/errors response diagnostic catalog", () => {
 
     for (const code of [
       "response-body-unreadable",
+      "response-body-too-large",
       "response-body-empty",
       "response-body-not-json",
       "response-json-schema-mismatch",

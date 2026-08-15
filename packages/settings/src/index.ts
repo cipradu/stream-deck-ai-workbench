@@ -26,6 +26,7 @@ import {
 import { createSanitizedFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import {
   findProviderEntry,
+  resolveProviderCapability,
   type ProviderCapabilityMetadata,
   type ProviderSettingRequirement,
   type SensitiveSelectorRequirement,
@@ -222,6 +223,12 @@ const ActionSettingsPayloadSchema = Schema.Struct({
   metricVariant: Schema.optional(Schema.String),
 });
 
+const StatusActionSettingsPayloadSchema = Schema.Struct({
+  familyId: Schema.Literal("status"),
+  providerId: Schema.optional(ProviderIdSchema),
+  refreshIntervalSeconds: Schema.optional(Schema.Number),
+});
+
 const SensitiveSelectorClassSchema = Schema.Literal("account", "organization", "project", "team", "workspace");
 
 // Settings-internal credential material: the secret decodes
@@ -369,6 +376,8 @@ const ALLOWED_ACTION_SETTING_KEYS = new Set([
   "metricVariant",
 ]);
 
+const ALLOWED_STATUS_ACTION_SETTING_KEYS = new Set(["familyId", "providerId", "refreshIntervalSeconds"]);
+
 const ALLOWED_DISPLAY_PREFERENCE_KEYS = new Set(["usageDisplayMode", "label", "color"]);
 
 const ALLOWED_CREDENTIAL_PROFILE_REFERENCE_KEYS = new Set(["kind", "credentialClass", "profileId"]);
@@ -376,6 +385,10 @@ const ALLOWED_CREDENTIAL_PROFILE_REFERENCE_KEYS = new Set(["kind", "credentialCl
 const ALLOWED_SEVERITY_PROFILE_REFERENCE_KEYS = new Set(["kind", "profileId"]);
 
 export function parseActionSettings(input: unknown): SettingsResult<NormalizedActionSettingsView> {
+  if (isRecord(input) && input.familyId === "status") {
+    return parseStatusActionSettings(input);
+  }
+
   const forbiddenField = findForbiddenActionSettingsKey(input);
   if (forbiddenField !== undefined) {
     return settingsValidationFailure("action-settings-forbidden-sensitive-field");
@@ -387,7 +400,6 @@ export function parseActionSettings(input: unknown): SettingsResult<NormalizedAc
   if (!parsed.ok) {
     return parsed;
   }
-
   const capability = findProviderCapability({
     actionFamilyId: parsed.value.familyId,
     providerId: parsed.value.providerId,
@@ -443,6 +455,50 @@ export function parseActionSettings(input: unknown): SettingsResult<NormalizedAc
   };
 }
 
+function parseStatusActionSettings(input: Readonly<Record<string, unknown>>): SettingsResult<NormalizedActionSettingsView> {
+  if (Object.keys(input).some((key) => !ALLOWED_STATUS_ACTION_SETTING_KEYS.has(key))) {
+    return settingsValidationFailure("status-action-settings-forbidden-field");
+  }
+
+  const parsed = parseSettingsUnknown(StatusActionSettingsPayloadSchema, input, {
+    reasonCode: "status-action-settings-schema",
+  });
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const providerId = parsed.value.providerId ?? "anthropic-api";
+  if (resolveProviderCapability(providerId, "status") === undefined) {
+    return settingsValidationFailure("status-provider-not-supported");
+  }
+
+  const refreshIntervalSeconds = parsed.value.refreshIntervalSeconds ?? REFRESH_INTERVAL_DEFAULT_SECONDS;
+  if (
+    !Number.isInteger(refreshIntervalSeconds) ||
+    refreshIntervalSeconds < REFRESH_INTERVAL_MIN_SECONDS ||
+    refreshIntervalSeconds > REFRESH_INTERVAL_MAX_SECONDS
+  ) {
+    return settingsValidationFailure("action-settings-refresh-interval-out-of-range", ["refreshIntervalSeconds"]);
+  }
+
+  const schedulerKeyParts: SchedulerKeyParts = {
+    familyId: "status",
+    providerId,
+    credentialProfileId: "none",
+  };
+  return {
+    ok: true,
+    value: {
+      familyId: "status",
+      providerId,
+      refreshIntervalSeconds,
+      displayPreferences: {},
+      schedulerKeyParts,
+      schedulerKey: serializeSchedulerKey(schedulerKeyParts),
+    },
+  };
+}
+
 export function parseGlobalSettings(input: unknown): SettingsResult<NormalizedGlobalSettingsView> {
   const parsed = parseSettingsUnknown(GlobalSettingsPayloadSchema, input, {
     reasonCode: "global-settings-schema",
@@ -489,6 +545,10 @@ export function parsePropertyInspectorPayload(input: unknown): SettingsResult<Pr
         actionSettings: actionSettings.value,
       },
     };
+  }
+
+  if (isRecord(envelope.value.payload) && envelope.value.payload.familyId === "status") {
+    return settingsValidationFailure("status-property-inspector-global-settings-forbidden");
   }
 
   const globalSettings = parseGlobalSettings(envelope.value.payload);

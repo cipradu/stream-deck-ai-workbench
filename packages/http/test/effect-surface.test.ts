@@ -5,7 +5,7 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "@effect/platform";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   taggedFailureToSanitizedFailure,
@@ -19,6 +19,7 @@ import {
   executeRequest,
   fetchHttpClientLayer,
   type JsonResponseClassifier,
+  MAX_BOUNDED_JSON_RESPONSE_BYTES,
   MAX_RETRY_AFTER_SECONDS,
   requestJsonSchema,
   requestTextBody,
@@ -36,7 +37,12 @@ const RAW_NEEDLES = {
 
 const THIRTY_MINUTE_RETRY_AFTER_SECONDS = 1_800;
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 const RemainingSchema = Schema.Struct({ remaining: Schema.Number });
+const StatusEnvelopeSchema = Schema.Struct({ incidents: Schema.Array(Schema.Unknown) });
 const NestedUsageSchema = Schema.Struct({
   five_hour: Schema.Struct({
     utilization: Schema.Number,
@@ -63,6 +69,68 @@ function respond(status: number, body: string, headers?: Readonly<Record<string,
         new Response(body, { status, ...(headers === undefined ? {} : { headers }) }),
       ),
     );
+}
+
+function streamedRespond(
+  chunks: readonly Uint8Array[],
+  onCancel: () => void,
+  cancelFailure?: Error,
+  headers?: Readonly<Record<string, string>>,
+): ExecuteFake {
+  return (request) => {
+    let chunkIndex = 0;
+    return Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              const chunk = chunks[chunkIndex];
+              if (chunk === undefined) {
+                controller.close();
+                return;
+              }
+              chunkIndex += 1;
+              controller.enqueue(chunk);
+              return Promise.resolve();
+            },
+            cancel() {
+              onCancel();
+              return cancelFailure === undefined ? undefined : Promise.reject(cancelFailure);
+            },
+          }),
+          { status: 200, ...(headers === undefined ? {} : { headers }) },
+        ),
+      ),
+    );
+  };
+}
+
+function trackResponseAccess(
+  execute: ExecuteFake,
+  onAccess: (property: PropertyKey) => void,
+  forbidden: readonly PropertyKey[],
+): ExecuteFake {
+  return (request) =>
+    execute(request).pipe(
+      Effect.map(
+        (response) =>
+          new Proxy(response, {
+            get(target, property, receiver) {
+              onAccess(property);
+              if (forbidden.includes(property)) {
+                throw new Error(`forbidden response access: ${String(property)}`);
+              }
+              return Reflect.get(target, property, receiver);
+            },
+          }),
+      ),
+    );
+}
+
+function paddedStatusBody(byteLength: number): string {
+  const json = '{"incidents":[]}';
+  return `${json}${" ".repeat(byteLength - json.length)}`;
 }
 
 /** Wraps a fake so tests can assert `execute` ran EXACTLY ONCE (no retry). */
@@ -106,7 +174,7 @@ function neverResponds(): ExecuteFake {
  * has ENTERED the body-read phase. That phase is exactly what the fix brings
  * under the one-shot deadline + caller-abort race.
  */
-function stalledBodyResponse(onBodyRead: () => void): ExecuteFake {
+function stalledBodyResponse(onBodyRead: () => void, onCancel: () => void = () => {}): ExecuteFake {
   return (request) =>
     Effect.succeed(
       HttpClientResponse.fromWeb(
@@ -118,6 +186,9 @@ function stalledBodyResponse(onBodyRead: () => void): ExecuteFake {
               // Never enqueue, never close, never resolve: the body read stalls until the
               // deadline fires or the caller aborts.
               return new Promise<void>(() => {});
+            },
+            cancel() {
+              onCancel();
             },
           }),
           { status: 200 },
@@ -164,6 +235,7 @@ function taggedFailure<A>(exit: Exit.Exit<A, SanitizedTaggedError>): SanitizedTa
 }
 
 const baseRequest = { url: RAW_NEEDLES.requestUrl, headers: { authorization: RAW_NEEDLES.requestHeader } } as const;
+const publicStatusRequest = { url: "https://provider.example/status" } as const;
 
 describe("@ai-workbench/http Effect-native surface", () => {
   it("exposes the FetchHttpClient layer adapters provide at the runtime root", () => {
@@ -191,6 +263,219 @@ describe("@ai-workbench/http Effect-native surface", () => {
     );
     expect(exit).toStrictEqual(Exit.succeed({ remaining: 12 }));
     expect(classifierCalls).toBe(0);
+  });
+
+  it("requestJsonSchema rejects a 65,537-byte streamed Status body before decode and cancels the reader", async () => {
+    const bodyBytes = new TextEncoder().encode(paddedStatusBody(MAX_BOUNDED_JSON_RESPONSE_BYTES + 1));
+    let cancellationCount = 0;
+    let classifierCalls = 0;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, {
+        responseBodyMode: "bounded",
+        responseClassifier: () => {
+          classifierCalls += 1;
+          return "response-json-schema-mismatch";
+        },
+      }),
+      streamedRespond(
+        [
+          bodyBytes.subarray(0, MAX_BOUNDED_JSON_RESPONSE_BYTES),
+          bodyBytes.subarray(MAX_BOUNDED_JSON_RESPONSE_BYTES),
+        ],
+        () => {
+          cancellationCount += 1;
+        },
+      ),
+    );
+
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("ValidationDrift");
+    expect(tagged.reasonCode).toBe("response-body-too-large");
+    expect(taggedFailureToSanitizedFailure(tagged)).toMatchObject({
+      category: "validation-drift",
+      diagnostics: { reasonCode: "response-body-too-large" },
+    });
+    expect(classifierCalls).toBe(0);
+    expect(cancellationCount).toBe(1);
+  });
+
+  it("requestJsonSchema accepts exactly 65,536 streamed bytes and decodes once after stream completion", async () => {
+    const decode = vi.spyOn(TextDecoder.prototype, "decode");
+    const bodyBytes = new TextEncoder().encode(paddedStatusBody(MAX_BOUNDED_JSON_RESPONSE_BYTES));
+    let cancellationCount = 0;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes.subarray(0, 32_768), bodyBytes.subarray(32_768)], () => {
+        cancellationCount += 1;
+      }),
+    );
+
+    expect(exit).toStrictEqual(Exit.succeed({ incidents: [] }));
+    expect(decode).toHaveBeenCalledOnce();
+    expect(cancellationCount).toBe(0);
+  });
+
+  it("requestJsonSchema decodes a multibyte character split across accepted stream chunks", async () => {
+    const bodyBytes = new TextEncoder().encode('{"incidents":["é"]}');
+    const splitAt = bodyBytes.indexOf(0xc3) + 1;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes.subarray(0, splitAt), bodyBytes.subarray(splitAt)], () => {}),
+    );
+
+    expect(exit).toStrictEqual(Exit.succeed({ incidents: ["é"] }));
+  });
+
+  it("requestJsonSchema rejects a single crossing chunk without parsing it", async () => {
+    const parse = vi.spyOn(JSON, "parse");
+    const bodyBytes = new TextEncoder().encode(paddedStatusBody(MAX_BOUNDED_JSON_RESPONSE_BYTES + 1));
+    let cancellationCount = 0;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes], () => {
+        cancellationCount += 1;
+      }),
+    );
+
+    const tagged = taggedFailure(exit);
+    expect(tagged).toMatchObject({ _tag: "ValidationDrift", reasonCode: "response-body-too-large" });
+    expect(parse).not.toHaveBeenCalled();
+    expect(cancellationCount).toBe(1);
+  });
+
+  it("requestJsonSchema preserves body-too-large as primary when reader cancellation rejects", async () => {
+    const cancelFailureMarker = "fabricated-reader-cancel-failure";
+    const bodyBytes = new TextEncoder().encode(paddedStatusBody(MAX_BOUNDED_JSON_RESPONSE_BYTES + 1));
+    let cancellationCount = 0;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond(
+        [bodyBytes],
+        () => {
+          cancellationCount += 1;
+        },
+        new Error(cancelFailureMarker),
+      ),
+    );
+
+    const tagged = taggedFailure(exit);
+    expect(tagged).toMatchObject({ _tag: "ValidationDrift", reasonCode: "response-body-too-large" });
+    expect(taggedFailureToSanitizedFailure(tagged)).toMatchObject({
+      category: "validation-drift",
+      diagnostics: { reasonCode: "response-body-too-large" },
+    });
+    expect(JSON.stringify(tagged) + JSON.stringify(taggedFailureToSanitizedFailure(tagged))).not.toContain(
+      cancelFailureMarker,
+    );
+    if (Exit.isFailure(exit)) {
+      expect(Option.getOrUndefined(Cause.dieOption(exit.cause))).toBeUndefined();
+    }
+    expect(cancellationCount).toBe(1);
+  });
+
+  it("requestJsonSchema does not swallow an unrelated defect after bounded stream completion", async () => {
+    const decodeFailureMarker = "fabricated-text-decoder-defect";
+    vi.spyOn(TextDecoder.prototype, "decode").mockImplementation(() => {
+      throw new Error(decodeFailureMarker);
+    });
+    const bodyBytes = new TextEncoder().encode('{"incidents":[]}');
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes], () => {}),
+    );
+
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(String(Option.getOrUndefined(Cause.dieOption(exit.cause)))).toContain(decodeFailureMarker);
+      expect(Option.getOrUndefined(Cause.failureOption(exit.cause))).toBeUndefined();
+    }
+  });
+
+  it("requestJsonSchema ignores a false-large Content-Length and trusts accepted stream bytes", async () => {
+    const bodyBytes = new TextEncoder().encode('{"incidents":[]}');
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes], () => {}, undefined, {
+        "content-length": String(MAX_BOUNDED_JSON_RESPONSE_BYTES + 1),
+      }),
+    );
+
+    expect(exit).toStrictEqual(Exit.succeed({ incidents: [] }));
+  });
+
+  it("requestJsonSchema rejects streamed bytes over the cap despite a false-small Content-Length", async () => {
+    const bodyBytes = new TextEncoder().encode(paddedStatusBody(MAX_BOUNDED_JSON_RESPONSE_BYTES + 1));
+    let cancellationCount = 0;
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond(
+        [bodyBytes],
+        () => {
+          cancellationCount += 1;
+        },
+        undefined,
+        { "content-length": "1" },
+      ),
+    );
+
+    expect(taggedFailure(exit)).toMatchObject({
+      _tag: "ValidationDrift",
+      reasonCode: "response-body-too-large",
+    });
+    expect(cancellationCount).toBe(1);
+  });
+
+  it("requestJsonSchema keeps malformed under-cap JSON on the existing safe decode path", async () => {
+    const bodyBytes = new TextEncoder().encode('{"incidents":[');
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes], () => {}),
+    );
+
+    expect(responseDiagnosticCode(taggedFailure(exit))).toBe("response-body-not-json");
+  });
+
+  it("requestJsonSchema keeps under-cap schema drift on the existing safe decode path", async () => {
+    const bodyBytes = new TextEncoder().encode('{"incidents":"invalid"}');
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      streamedRespond([bodyBytes], () => {}),
+    );
+
+    expect(responseDiagnosticCode(taggedFailure(exit))).toBe("response-json-schema-mismatch");
+  });
+
+  it("requestJsonSchema bounded mode never uses full-body accessors or response inspection", async () => {
+    const accessed: PropertyKey[] = [];
+    const bodyBytes = new TextEncoder().encode('{"incidents":[]}');
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, { responseBodyMode: "bounded" }),
+      trackResponseAccess(
+        streamedRespond([bodyBytes], () => {}),
+        (property) => accessed.push(property),
+        ["text", "json", "arrayBuffer", "toJSON"],
+      ),
+    );
+
+    expect(exit).toStrictEqual(Exit.succeed({ incidents: [] }));
+    expect(accessed).toContain("stream");
+    expect(accessed).not.toEqual(expect.arrayContaining(["text", "json", "arrayBuffer", "toJSON"]));
+  });
+
+  it("requestJsonSchema without bounded mode retains the existing response.text path", async () => {
+    const accessed: PropertyKey[] = [];
+    const exit = await runSurface(
+      requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema),
+      trackResponseAccess(
+        respond(200, '{"incidents":[]}'),
+        (property) => accessed.push(property),
+        ["stream"],
+      ),
+    );
+
+    expect(exit).toStrictEqual(Exit.succeed({ incidents: [] }));
+    expect(accessed.filter((property) => property === "text")).toHaveLength(1);
+    expect(accessed).not.toContain("stream");
   });
 
   it("executeRequest yields the raw 2xx response for adapter-side composition", async () => {
@@ -387,6 +672,75 @@ describe("@ai-workbench/http Effect-native surface", () => {
     expect(serialized).not.toContain("fake-token");
   });
 
+  it.each([401, 403] as const)(
+    "requestJsonSchema credential-free status mode maps public HTTP %i to generic status failure",
+    async (status) => {
+      const exit = await runSurface(
+        requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, {
+          statusClassificationMode: "credential-free",
+        }),
+        respond(status, RAW_NEEDLES.responseBody),
+      );
+      const tagged = taggedFailure(exit);
+      const sanitized = taggedFailureToSanitizedFailure(tagged);
+
+      expect(tagged).toMatchObject({
+        _tag: "HttpStatusFailure",
+        httpStatus: status,
+        reasonCode: "provider-http-status",
+        statusClass: "4xx",
+      });
+      expect(sanitized).toMatchObject({
+        category: "http-status-failure",
+        diagnostics: {
+          httpStatus: status,
+          httpStatusClass: "4xx",
+          reasonCode: "provider-http-status",
+        },
+        retryClass: "transient-retry",
+      });
+      expect(sanitized.safePublicMessage.toLowerCase()).not.toMatch(
+        /auth|required|credential|scope|access denied|reauthorize/,
+      );
+    },
+  );
+
+  it.each([
+    [401, "UnauthorizedExpired", "unauthorized-expired"],
+    [403, "InsufficientCredentialScope", "insufficient-credential-scope"],
+  ] as const)(
+    "requestJsonSchema without a status mode keeps HTTP %i on the default %s mapping",
+    async (status, tag, category) => {
+      const exit = await runSurface(
+        requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema),
+        respond(status, RAW_NEEDLES.responseBody),
+      );
+      const tagged = taggedFailure(exit);
+
+      expect(tagged).toMatchObject({ _tag: tag, httpStatus: status });
+      expect(taggedFailureToSanitizedFailure(tagged).category).toBe(category);
+    },
+  );
+
+  it.each([
+    [401, "UnauthorizedExpired", "unauthorized-expired"],
+    [403, "InsufficientCredentialScope", "insufficient-credential-scope"],
+  ] as const)(
+    "requestJsonSchema explicit credentialed mode keeps HTTP %i on the %s mapping",
+    async (status, tag, category) => {
+      const exit = await runSurface(
+        requestJsonSchema(publicStatusRequest, StatusEnvelopeSchema, {
+          statusClassificationMode: "credentialed",
+        }),
+        respond(status, RAW_NEEDLES.responseBody),
+      );
+      const tagged = taggedFailure(exit);
+
+      expect(tagged).toMatchObject({ _tag: tag, httpStatus: status });
+      expect(taggedFailureToSanitizedFailure(tagged).category).toBe(category);
+    },
+  );
+
   it("classifies 429 + numeric Retry-After as RateLimited carrying the parsed delay", async () => {
     const exit = await runSurface(
       executeRequest(buildHttpRequest(baseRequest)),
@@ -484,6 +838,90 @@ describe("@ai-workbench/http Effect-native surface", () => {
 // event-driven abort, never a wall-clock sleep — and pin executeRequest as the
 // execute/header-phase-only split helper (unchanged behavior).
 describe("@ai-workbench/http requestJsonSchema full-pipeline deadline + abort", () => {
+  it("bounded mode keeps a caller abort before headers as typed Abort", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const exit = await runSurface(
+      requestJsonSchema(
+        { ...publicStatusRequest, signal: controller.signal },
+        StatusEnvelopeSchema,
+        { responseBodyMode: "bounded" },
+      ),
+      neverResponds(),
+    );
+
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("Abort");
+    expect(tagged.reasonCode).toBe("request-aborted");
+  });
+
+  it("bounded mode keeps a stalled body deadline as Timeout and cancels the reader once", async () => {
+    const started = Promise.withResolvers<void>();
+    let cancellationCount = 0;
+
+    const program = Effect.gen(function* () {
+      const fiber = yield* Effect.fork(
+        requestJsonSchema(
+          { ...publicStatusRequest, timeoutMs: 1_000 },
+          StatusEnvelopeSchema,
+          { responseBodyMode: "bounded" },
+        ),
+      );
+      yield* Effect.promise(() => started.promise);
+      yield* TestClock.adjust(Duration.millis(1_000));
+      return yield* Fiber.join(fiber);
+    });
+
+    const exit = await Effect.runPromiseExit(
+      program.pipe(
+        Effect.provide(
+          fakeHttpClientLayer(
+            stalledBodyResponse(
+              () => started.resolve(),
+              () => {
+                cancellationCount += 1;
+              },
+            ),
+          ),
+        ),
+        Effect.provide(TestContext.TestContext),
+      ),
+    );
+
+    const tagged = taggedFailure(exit);
+    expect(tagged._tag).toBe("Timeout");
+    expect(tagged.reasonCode).toBe("request-timeout");
+    expect(cancellationCount).toBe(1);
+  });
+
+  it("bounded mode keeps a caller abort during body read as typed Abort and cancels the reader once", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    let cancellationCount = 0;
+
+    const exitPromise = runSurface(
+      requestJsonSchema(
+        { ...publicStatusRequest, signal: controller.signal },
+        StatusEnvelopeSchema,
+        { responseBodyMode: "bounded" },
+      ),
+      stalledBodyResponse(
+        () => started.resolve(),
+        () => {
+          cancellationCount += 1;
+        },
+      ),
+    );
+
+    await started.promise;
+    controller.abort();
+
+    const tagged = taggedFailure(await exitPromise);
+    expect(tagged._tag).toBe("Abort");
+    expect(tagged.reasonCode).toBe("request-aborted");
+    expect(cancellationCount).toBe(1);
+  });
+
   it("bounds the lazily-read body by the deadline — a stalled body fails with Timeout, not a hang", async () => {
     let bodyReadBegan!: () => void;
     const started = new Promise<void>((resolve) => {

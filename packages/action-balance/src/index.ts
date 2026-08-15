@@ -11,13 +11,13 @@ import {
   type MetricDirection,
   type SeverityThresholdSet,
 } from "@ai-workbench/contracts";
-import { buildRendererInput, headerLabelForActionSettings, type DisplayRendererInput } from "@ai-workbench/display";
+import { buildRendererInput, headerLabelForActionSettings, type MetricDisplayRendererInput } from "@ai-workbench/display";
 import { mapProviderFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import { createSourceGatedBalanceFetch, listBalanceProviderAdapterBindings } from "@ai-workbench/provider-adapters";
 import {
   IMPLEMENTATION_STATUS_BEHAVIOR,
-  findProviderEntry,
-  listProviderEntriesForFamily,
+  listProviderCapabilitiesForFamily,
+  resolveProviderCapability,
   type DisplayBasis,
   type ProviderCapabilityMetadata,
   type ProviderPresentationMetadata,
@@ -85,27 +85,24 @@ export interface BuildBalanceRendererInputOptions {
 export function listBalanceProviderOptions(): readonly BalanceProviderOption[] {
   const adapterBindingIds = new Set(listBalanceProviderAdapterBindings().map((binding) => binding.adapterBindingId));
 
-  return listProviderEntriesForFamily("balance").flatMap((entry) => {
-    const providerId = entry.providerId;
+  return listProviderCapabilitiesForFamily("balance").flatMap(({ providerId, productLabel, capability }) => {
 
     if (!isBalanceProviderId(providerId)) {
       return [];
     }
 
-    return entry.capabilities
-      .filter((capability) => capability.actionFamilyId === "balance")
-      .map((capability) => balanceProviderOption(providerId, entry.productLabel, capability, adapterBindingIds));
+    return [balanceProviderOption(providerId, productLabel, capability, adapterBindingIds)];
   });
 }
 
 export function resolveBalanceProviderOption(
   input: ResolveBalanceProviderOptionInput,
 ): BalanceActionResult<ResolvedBalanceProviderOption> {
-  const entry = findProviderEntry(input.providerId);
-  const capability = entry?.capabilities.find((candidate) => candidate.actionFamilyId === "balance");
-  if (entry === undefined || capability === undefined || !isBalanceProviderId(entry.providerId)) {
+  const resolved = resolveProviderCapability(input.providerId, "balance");
+  if (resolved === undefined || !isBalanceProviderId(resolved.providerId)) {
     return balanceFailure("unsupported", "balance-provider-not-found");
   }
+  const capability = resolved.capability;
 
   if (input.windowOrPeriod !== undefined && input.windowOrPeriod !== capability.coverageKind) {
     return balanceFailure("unsupported", "unsupported-balance-coverage");
@@ -115,8 +112,8 @@ export function resolveBalanceProviderOption(
     ok: true,
     value: {
       ...balanceProviderOption(
-        entry.providerId,
-        entry.productLabel,
+        resolved.providerId,
+        resolved.productLabel,
         capability,
         new Set(listBalanceProviderAdapterBindings().map((binding) => binding.adapterBindingId)),
       ),
@@ -189,7 +186,7 @@ export async function buildSourceGatedBalanceSchedulerOutput(
   });
 }
 
-export function buildBalanceRendererInput(input: BuildBalanceRendererInputOptions): DisplayRendererInput {
+export function buildBalanceRendererInput(input: BuildBalanceRendererInputOptions): MetricDisplayRendererInput {
   const capability = capabilityForActionSettings(input.actionSettings);
   const authExpiredHint = capability?.presentation?.authExpiredHint;
 
@@ -256,7 +253,7 @@ function schedulerOutputForFailure(input: {
 }
 
 function capabilityForActionSettings(actionSettings: NormalizedActionSettingsView): ProviderCapabilityMetadata | undefined {
-  return findProviderEntry(actionSettings.providerId)?.capabilities.find((candidate) => candidate.actionFamilyId === "balance");
+  return resolveProviderCapability(actionSettings.providerId, "balance")?.capability;
 }
 
 function balanceFailure(

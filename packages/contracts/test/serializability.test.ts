@@ -11,6 +11,7 @@ import type {
   SeverityProfileReference,
   SeverityThresholdSet,
   SnapshotCoverage,
+  StatusSnapshot,
   UsageSnapshot,
 } from "../src/index.js";
 
@@ -54,6 +55,38 @@ const evergreenBalanceSnapshot: NormalizedSnapshot = {
   unit: "money",
   coverage: { kind: "evergreen" },
   value: 25,
+  fetchedAtEpochMs: 1_751_700_000_000,
+};
+
+const operationalStatusSnapshot: StatusSnapshot = {
+  familyId: "status",
+  providerId: "anthropic-api",
+  activeIncidentCount: 0,
+  fetchedAtEpochMs: 1_751_700_000_000,
+};
+
+const strictActiveStatusSnapshot: StatusSnapshot = {
+  familyId: "status",
+  providerId: "minimax",
+  activeIncidentCount: 1,
+  highestImpact: "minor",
+  fetchedAtEpochMs: 1_751_700_000_000,
+};
+
+const openAiOperationalStatusSnapshot: StatusSnapshot = {
+  familyId: "status",
+  providerId: "openai-api",
+  activeIncidentCount: 0,
+  providerStatusIndicator: "maintenance",
+  fetchedAtEpochMs: 1_751_700_000_000,
+};
+
+const openAiActiveStatusSnapshot: StatusSnapshot = {
+  familyId: "status",
+  providerId: "openai-api",
+  activeIncidentCount: 2,
+  highestImpact: "major",
+  providerStatusIndicator: "minor",
   fetchedAtEpochMs: 1_751_700_000_000,
 };
 
@@ -132,6 +165,10 @@ describe("contract serializability", () => {
     ["usage snapshot", usageSnapshot],
     ["balance snapshot", balanceSnapshot],
     ["evergreen balance snapshot", evergreenBalanceSnapshot],
+    ["operational status snapshot", operationalStatusSnapshot],
+    ["strict active status snapshot", strictActiveStatusSnapshot],
+    ["OpenAI operational status snapshot", openAiOperationalStatusSnapshot],
+    ["OpenAI active status snapshot", openAiActiveStatusSnapshot],
     ["coverage variants", coverageVariants],
     ["credential profile reference", credentialProfileRef],
     ["severity profile reference", severityProfileRef],
@@ -146,5 +183,25 @@ describe("contract serializability", () => {
 
   it.each(cases)("%s survives a JSON round-trip", (_name, value) => {
     expect(roundTrip(value)).toEqual(value);
+  });
+
+  it("keeps all four provider/count Status combinations distinct across round trips", () => {
+    expect(roundTrip(operationalStatusSnapshot)).not.toHaveProperty("highestImpact");
+    expect(roundTrip(operationalStatusSnapshot)).not.toHaveProperty("providerStatusIndicator");
+    expect(roundTrip(strictActiveStatusSnapshot)).toMatchObject({
+      activeIncidentCount: 1,
+      highestImpact: "minor",
+    });
+    expect(roundTrip(strictActiveStatusSnapshot)).not.toHaveProperty("providerStatusIndicator");
+    expect(roundTrip(openAiOperationalStatusSnapshot)).toMatchObject({
+      activeIncidentCount: 0,
+      providerStatusIndicator: "maintenance",
+    });
+    expect(roundTrip(openAiOperationalStatusSnapshot)).not.toHaveProperty("highestImpact");
+    expect(roundTrip(openAiActiveStatusSnapshot)).toMatchObject({
+      activeIncidentCount: 2,
+      highestImpact: "major",
+      providerStatusIndicator: "minor",
+    });
   });
 });

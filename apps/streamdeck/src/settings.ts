@@ -34,6 +34,10 @@ const DEFAULT_ACTION_SETTINGS_BY_FAMILY = {
     providerId: "anthropic-api",
     displayPreferences: {},
   },
+  status: {
+    familyId: "status",
+    providerId: "anthropic-api",
+  },
 } as const;
 
 const LEGACY_USAGE_PROVIDER_IDS = {
@@ -240,10 +244,27 @@ export function defaultActionSettingsForFamily(familyId: ActionFamilyId): Writab
 
 function normalizeActionSettingsInputForFamily(familyId: ActionFamilyId, input: unknown): unknown {
   if (!isRecord(input)) {
-    return DEFAULT_ACTION_SETTINGS_BY_FAMILY[familyId];
+    return familyId === "status" ? input : DEFAULT_ACTION_SETTINGS_BY_FAMILY[familyId];
   }
   if (containsForbiddenCompatibilityKey(input)) {
     return input;
+  }
+
+  if (familyId === "status") {
+    const refreshIntervalSeconds =
+      numericSetting(input.refreshIntervalSeconds) ??
+      clampLegacyRefreshInterval(numericSetting(input.intervalSeconds) ?? numericFromString(input.intervalSeconds));
+
+    const normalized: Record<string, unknown> = {
+      ...input,
+      familyId: Object.prototype.hasOwnProperty.call(input, "familyId") ? input.familyId : "status",
+      providerId: Object.prototype.hasOwnProperty.call(input, "providerId")
+        ? input.providerId
+        : DEFAULT_ACTION_SETTINGS_BY_FAMILY.status.providerId,
+      ...(refreshIntervalSeconds === undefined ? {} : { refreshIntervalSeconds }),
+    };
+    delete normalized.intervalSeconds;
+    return normalized;
   }
 
   const existingFamilyId = typeof input.familyId === "string" ? input.familyId : familyId;

@@ -10,14 +10,14 @@ import { pathToFileURL } from "node:url";
 
 import type { ActionFamilyId } from "@ai-workbench/contracts";
 
-import { BALANCE_ACTION_UUID, USAGE_ACTION_UUID, packageName } from "./constants.js";
+import { BALANCE_ACTION_UUID, STATUS_ACTION_UUID, USAGE_ACTION_UUID, packageName } from "./constants.js";
 import { createSdkLogSink, writeShellLog } from "./logging.js";
 import { createManagedRuntimeRunner, createRuntimeServices, type RuntimeRunner } from "./runtime.js";
 import { withLegacyCredentialProfiles } from "./settings.js";
 import { startRenderLoop, StreamDeckShell, type StreamDeckActionPort } from "./shell.js";
 
 export { packageName };
-export { BALANCE_ACTION_UUID, PLUGIN_UUID, USAGE_ACTION_UUID } from "./constants.js";
+export { BALANCE_ACTION_UUID, PLUGIN_UUID, STATUS_ACTION_UUID, USAGE_ACTION_UUID } from "./constants.js";
 export { listProviderOptionsForFamily } from "./property-inspector.js";
 export { renderDisplayInput } from "./renderer.js";
 export { StreamDeckShell } from "./shell.js";
@@ -41,6 +41,24 @@ interface WorkbenchActionOptions {
   readonly shell: StreamDeckShell;
   readonly run: RuntimeRunner;
 }
+
+export const WORKBENCH_ACTION_DEFINITIONS = [
+  {
+    familyId: "usage",
+    manifestId: USAGE_ACTION_UUID,
+    taskNamePrefix: "usage",
+  },
+  {
+    familyId: "balance",
+    manifestId: BALANCE_ACTION_UUID,
+    taskNamePrefix: "balance",
+  },
+  {
+    familyId: "status",
+    manifestId: STATUS_ACTION_UUID,
+    taskNamePrefix: "status",
+  },
+] as const satisfies readonly Omit<WorkbenchActionOptions, "run" | "shell">[];
 
 class WorkbenchAction extends SingletonAction {
   override readonly manifestId: string;
@@ -120,24 +138,9 @@ export async function startAiWorkbenchStreamDeckPlugin(deck: typeof streamDeck =
     message: "AI Workbench plugin starting.",
   });
 
-  deck.actions.registerAction(
-    new WorkbenchAction({
-      familyId: "usage",
-      manifestId: USAGE_ACTION_UUID,
-      run,
-      shell,
-      taskNamePrefix: "usage",
-    }),
-  );
-  deck.actions.registerAction(
-    new WorkbenchAction({
-      familyId: "balance",
-      manifestId: BALANCE_ACTION_UUID,
-      run,
-      shell,
-      taskNamePrefix: "balance",
-    }),
-  );
+  for (const definition of WORKBENCH_ACTION_DEFINITIONS) {
+    deck.actions.registerAction(new WorkbenchAction({ ...definition, run, shell }));
+  }
   // Property Inspector `global`-bound fields (API keys) save through Stream
   // Deck global settings; classify each change centrally and refetch exactly
   // the affected provider keys.

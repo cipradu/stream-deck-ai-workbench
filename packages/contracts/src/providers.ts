@@ -27,3 +27,7 @@ export type BalanceProviderId = (typeof BALANCE_PROVIDER_IDS)[number];
 
 export const PROVIDER_IDS = [...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
+
+/** Existing provider identities approved for the first Status catalog. */
+export const STATUS_PROVIDER_IDS = ["anthropic-api", "openai-api", "moonshot", "minimax"] as const satisfies readonly ProviderId[];
+export type StatusProviderId = (typeof STATUS_PROVIDER_IDS)[number];

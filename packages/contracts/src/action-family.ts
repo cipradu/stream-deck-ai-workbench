@@ -4,7 +4,7 @@ import type { CoverageKind, UsageWindowId } from "./metrics.js";
  * Action families: capability groups exposed as Stream Deck actions.
  * Usage and Balance are the first families, not the limit of the model.
  */
-export const ACTION_FAMILY_IDS = ["usage", "balance"] as const;
+export const ACTION_FAMILY_IDS = ["usage", "balance", "status"] as const;
 export type ActionFamilyId = (typeof ACTION_FAMILY_IDS)[number];
 
 /** Usage-family capability shape: which rolling windows a provider capability supports. */
@@ -19,6 +19,11 @@ export interface BalanceCapability {
   readonly coverageKind: CoverageKind;
 }
 
+/** Status-family capability shape: public provider incident status with no metric semantics. */
+export interface StatusCapability {
+  readonly familyId: "status";
+}
+
 /**
  * Extensibility seam: family-specific capability shapes are keyed by family
  * id. A future action family adds its id to ACTION_FAMILY_IDS and one key
@@ -27,6 +32,7 @@ export interface BalanceCapability {
 export interface ActionFamilyCapabilityShapes {
   readonly usage: UsageCapability;
   readonly balance: BalanceCapability;
+  readonly status: StatusCapability;
 }
 
 export type ActionFamilyCapability<F extends ActionFamilyId = ActionFamilyId> = ActionFamilyCapabilityShapes[F];

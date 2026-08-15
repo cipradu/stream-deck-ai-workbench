@@ -8,14 +8,14 @@ import {
   type UsageProviderId,
   type UsageWindowId,
 } from "@ai-workbench/contracts";
-import { buildRendererInput, headerLabelForActionSettings, type DisplayRendererInput } from "@ai-workbench/display";
+import { buildRendererInput, headerLabelForActionSettings, type MetricDisplayRendererInput } from "@ai-workbench/display";
 import { mapProviderFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import { createSourceGatedUsageFetch, listUsageProviderAdapterBindings } from "@ai-workbench/provider-adapters";
 import {
   IMPLEMENTATION_STATUS_BEHAVIOR,
-  findProviderEntry,
-  listProviderEntriesForFamily,
+  listProviderCapabilitiesForFamily,
   resolveCapabilityMetricForWindow,
+  resolveProviderCapability,
   type ProviderCapabilityMetadata,
   type ProviderPresentationMetadata,
   type RegistryOpenDecision,
@@ -81,31 +81,28 @@ export interface BuildUsageRendererInputOptions {
 export function listUsageProviderOptions(): readonly UsageProviderOption[] {
   const adapterBindingIds = new Set(listUsageProviderAdapterBindings().map((binding) => binding.adapterBindingId));
 
-  return listProviderEntriesForFamily("usage").flatMap((entry) => {
-    const providerId = entry.providerId;
+  return listProviderCapabilitiesForFamily("usage").flatMap(({ providerId, productLabel, capability }) => {
 
     if (!isUsageProviderId(providerId)) {
       return [];
     }
 
-    return entry.capabilities
-      .filter((capability) => capability.actionFamilyId === "usage")
-      .map((capability) => usageProviderOption(providerId, entry.productLabel, capability, adapterBindingIds));
+    return [usageProviderOption(providerId, productLabel, capability, adapterBindingIds)];
   });
 }
 
 export function resolveUsageProviderOption(
   input: ResolveUsageProviderOptionInput,
 ): UsageActionResult<ResolvedUsageProviderOption> {
-  const entry = findProviderEntry(input.providerId);
-  const capability = entry?.capabilities.find((candidate) => candidate.actionFamilyId === "usage");
-  if (entry === undefined || capability === undefined || !isUsageProviderId(entry.providerId)) {
+  const resolved = resolveProviderCapability(input.providerId, "usage");
+  if (resolved === undefined || !isUsageProviderId(resolved.providerId)) {
     return usageFailure("unsupported", "usage-provider-not-found");
   }
+  const capability = resolved.capability;
 
   const option = usageProviderOption(
-    entry.providerId,
-    entry.productLabel,
+    resolved.providerId,
+    resolved.productLabel,
     capability,
     new Set(listUsageProviderAdapterBindings().map((binding) => binding.adapterBindingId)),
   );
@@ -188,7 +185,7 @@ export async function buildSourceGatedUsageSchedulerOutput(
   });
 }
 
-export function buildUsageRendererInput(input: BuildUsageRendererInputOptions): DisplayRendererInput {
+export function buildUsageRendererInput(input: BuildUsageRendererInputOptions): MetricDisplayRendererInput {
   const capability = capabilityForActionSettings(input.actionSettings);
   const authExpiredHint = capability?.presentation?.authExpiredHint;
   const windowOrPeriod = isUsageWindowId(input.actionSettings.windowOrPeriod)
@@ -229,7 +226,7 @@ export function resolveUsageCategoryMetric(
   providerId: string,
   windowOrPeriod: UsageWindowId | undefined,
 ): ResolvedCapabilityMetric | undefined {
-  const capability = findProviderEntry(providerId)?.capabilities.find((candidate) => candidate.actionFamilyId === "usage");
+  const capability = resolveProviderCapability(providerId, "usage")?.capability;
   return capability === undefined ? undefined : resolveCapabilityMetricForWindow(capability, windowOrPeriod);
 }
 
@@ -277,7 +274,7 @@ function schedulerOutputForFailure(input: {
 }
 
 function capabilityForActionSettings(actionSettings: NormalizedActionSettingsView): ProviderCapabilityMetadata | undefined {
-  return findProviderEntry(actionSettings.providerId)?.capabilities.find((candidate) => candidate.actionFamilyId === "usage");
+  return resolveProviderCapability(actionSettings.providerId, "usage")?.capability;
 }
 
 function usageFailure(

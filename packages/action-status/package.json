@@ -1,0 +1,22 @@
+{
+  "name": "@ai-workbench/action-status",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Status action-family catalog, incident policy, snapshot invariants, and display-input assembly",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-workbench/contracts": "workspace:*",
+    "@ai-workbench/display": "workspace:*",
+    "@ai-workbench/provider-registry": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}

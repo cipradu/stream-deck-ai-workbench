@@ -135,6 +135,205 @@ describe("@ai-workbench/settings public surface", () => {
 });
 
 describe("action settings normalization and privacy", () => {
+  it("normalizes Status through its own non-metric settings path", () => {
+    const result = parseActionSettings({ familyId: "status" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "anthropic-api",
+        refreshIntervalSeconds: 600,
+        displayPreferences: {},
+        schedulerKeyParts: {
+          familyId: "status",
+          providerId: "anthropic-api",
+          credentialProfileId: "none",
+        },
+        schedulerKey: "status|anthropic-api||none|",
+      },
+    });
+  });
+
+  it.each(["anthropic-api", "openai-api", "moonshot", "minimax"] as const)(
+    "normalizes approved Status provider %s with one fixed no-credential scheduler identity",
+    (providerId) => {
+      const result = parseActionSettings({ familyId: "status", providerId });
+
+      expect(result).toMatchObject({
+        ok: true,
+        value: {
+          familyId: "status",
+          providerId,
+          refreshIntervalSeconds: 600,
+          displayPreferences: {},
+          schedulerKeyParts: {
+            familyId: "status",
+            providerId,
+            credentialProfileId: "none",
+          },
+        },
+      });
+      if (result.ok) {
+        expect(Object.keys(result.value).sort()).toEqual([
+          "displayPreferences",
+          "familyId",
+          "providerId",
+          "refreshIntervalSeconds",
+          "schedulerKey",
+          "schedulerKeyParts",
+        ]);
+        expect(result.value.schedulerKeyParts).not.toHaveProperty("windowOrPeriod");
+        expect(result.value.schedulerKeyParts).not.toHaveProperty("metricVariant");
+      }
+    },
+  );
+
+  it.each(["deepseek", "zai-coding-plan", "unknown-provider"])(
+    "rejects provider %s outside the exact Status catalog",
+    (providerId) => {
+      expect(parseActionSettings({ familyId: "status", providerId })).toMatchObject({ ok: false });
+    },
+  );
+
+  it("accepts a configurable Status refresh interval without changing scheduler identity", () => {
+    const result = parseActionSettings({
+      familyId: "status",
+      providerId: "openai-api",
+      refreshIntervalSeconds: 900,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "openai-api",
+        refreshIntervalSeconds: 900,
+        displayPreferences: {},
+        schedulerKey: "status|openai-api||none|",
+      },
+    });
+  });
+
+  it.each([59, 3601, 600.5, Number.NaN])("rejects Status refresh interval %s as out of range", (refreshIntervalSeconds) => {
+    const result = parseActionSettings({
+      familyId: "status",
+      providerId: "anthropic-api",
+      refreshIntervalSeconds,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        diagnostics: { reasonCode: "action-settings-refresh-interval-out-of-range" },
+      },
+    });
+  });
+
+  it("classifies a Status refresh interval change as refresh-policy-only", () => {
+    const baseline = unwrapActionSettings({
+      familyId: "status",
+      providerId: "anthropic-api",
+      refreshIntervalSeconds: 600,
+    });
+    const refreshChanged = unwrapActionSettings({
+      familyId: "status",
+      providerId: "anthropic-api",
+      refreshIntervalSeconds: 900,
+    });
+
+    expect(classifyActionSettingsChange(baseline, refreshChanged)).toMatchObject({
+      kind: "refresh-policy-affecting",
+      schedulerKeyChanged: false,
+      providerRefetchRequired: false,
+      bypassBackoffAllowed: false,
+      refreshPolicyChanged: true,
+      displayOnly: false,
+      reasons: ["refresh-interval-changed"],
+    });
+  });
+
+  it.each([
+    "refreshInterval",
+    "pollIntervalSeconds",
+    "credentialProfileRef",
+    "credentialProfileId",
+    "credentialClass",
+    "credential",
+    "credentials",
+    "apiKey",
+    "apiKeyId",
+    "secret",
+    "token",
+    "authorizationHeader",
+    "authHeader",
+    "credentialMaterial",
+    "credentialValue",
+    "rawCredentialPayload",
+    "sensitiveSelectors",
+    "account",
+    "organization",
+    "project",
+    "team",
+    "workspace",
+    "accountId",
+    "organizationId",
+    "projectId",
+    "teamId",
+    "workspaceId",
+    "routingId",
+    "severityProfileRef",
+    "severityProfileId",
+    "thresholds",
+    "warningAt",
+    "criticalAt",
+    "warnFloor",
+    "criticalFloor",
+    "windowOrPeriod",
+    "window",
+    "category",
+    "categoryId",
+    "period",
+    "coverageKind",
+    "metricVariant",
+    "metricKind",
+    "displayPreferences",
+    "displayMode",
+    "label",
+    "color",
+    "components",
+    "component",
+    "componentId",
+    "include",
+    "exclude",
+    "page",
+    "pageStatus",
+    "maintenance",
+    "scheduledMaintenances",
+    "endpoint",
+    "endpointUrl",
+    "url",
+    "statusUrl",
+    "provider",
+    "vendor",
+    "nested",
+    "unknownField",
+  ])("rejects forbidden Status raw field %s before stripping or defaulting", (field) => {
+    const result = parseActionSettings({
+      familyId: "status",
+      providerId: "anthropic-api",
+      [field]: { hidden: RAW_NEEDLES.actionValue },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        diagnostics: { reasonCode: "status-action-settings-forbidden-field" },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(RAW_NEEDLES.actionValue);
+  });
+
   it("normalizes a missing refresh interval to 600 seconds and derives secret-free scheduler key parts", () => {
     const result = parseActionSettings(falActionPayload);
 
@@ -506,6 +705,45 @@ describe("global settings safe views and registry-derived requirements", () => {
 });
 
 describe("Property Inspector payload parsing", () => {
+  it("accepts a Status action update through the central action boundary", () => {
+    expect(
+      parsePropertyInspectorPayload({
+        kind: "action-settings-update",
+        payload: {
+          familyId: "status",
+          providerId: "openai-api",
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        kind: "action-settings-update",
+        actionSettings: {
+          familyId: "status",
+          providerId: "openai-api",
+          refreshIntervalSeconds: 600,
+          schedulerKeyParts: { credentialProfileId: "none" },
+        },
+      },
+    });
+  });
+
+  it("rejects a Status Property Inspector attempt to write global settings", () => {
+    expect(
+      parsePropertyInspectorPayload({
+        kind: "global-settings-update",
+        payload: {
+          familyId: "status",
+        },
+      }),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        diagnostics: { reasonCode: "status-property-inspector-global-settings-forbidden" },
+      },
+    });
+  });
+
   it("uses the same action settings rules and rejects secret-bearing action updates", () => {
     const result = parsePropertyInspectorPayload({
       kind: "action-settings-update",

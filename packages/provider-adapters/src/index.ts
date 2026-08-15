@@ -3,13 +3,17 @@ export const packageName = "@ai-workbench/provider-adapters" as const;
 export {
   findProviderAdapterBinding,
   listBalanceProviderAdapterBindings,
+  listStatusProviderAdapterBindings,
   listUsageProviderAdapterBindings,
 } from "./bindings.js";
 export { createBalanceProviderSourceFetchEffect } from "./providers/balance/index.js";
+export { createStatusProviderSourceFetchEffect } from "./providers/status/index.js";
 export { createUsageProviderSourceFetchEffect } from "./providers/usage/index.js";
 export {
   createSourceGatedBalanceFetch,
   createSourceGatedBalanceFetchEffect,
+  createSourceGatedStatusFetch,
+  createSourceGatedStatusFetchEffect,
   createSourceGatedUsageFetch,
   createSourceGatedUsageFetchEffect,
 } from "./source-gates.js";
@@ -30,8 +34,10 @@ export type {
   CodexSessionSnapshot,
   KimiCodeCredentialResult,
   CreateBalanceProviderSourceFetchInput,
+  CreateStatusProviderSourceFetchInput,
   CreateUsageProviderSourceFetchInput,
   CreateSourceGatedBalanceFetchInput,
+  CreateSourceGatedStatusFetchInput,
   CreateSourceGatedUsageFetchInput,
   NormalizeBalanceProviderResponseInput,
   ProviderAdapterBinding,
@@ -40,5 +46,6 @@ export type {
   ProviderCredentialResolution,
   ResolveProviderCredentialMaterial,
   UsageProviderLocalSourceReaders,
+  StatusProviderAdapterBinding,
   UsageProviderAdapterBinding,
 } from "./types.js";

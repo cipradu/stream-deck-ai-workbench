@@ -1,6 +1,8 @@
 import { buildBalanceRendererInput } from "@ai-workbench/action-balance";
+import { buildStatusRendererInput, resolveStatusProviderOption } from "@ai-workbench/action-status";
 import { buildUsageRendererInput } from "@ai-workbench/action-usage";
 import type { ActionFamilyId, DisplayState, SchedulerKey, SeverityThresholdSet } from "@ai-workbench/contracts";
+import type { DisplayRendererInput } from "@ai-workbench/display";
 import type { SanitizedFailure } from "@ai-workbench/errors";
 import type { StreamDeckLogSink } from "@ai-workbench/logging";
 import type { Scheduler, SchedulerOutput } from "@ai-workbench/scheduler";
@@ -132,6 +134,9 @@ export class StreamDeckShell {
    * thresholds resolve (best-effort compat path).
    */
   private async migrateLegacySeverityFloors(familyId: ActionFamilyId, rawSettings: unknown): Promise<void> {
+    if (familyId === "status") {
+      return;
+    }
     const profile =
       familyId === "balance"
         ? legacySeverityProfileForBalanceInput(rawSettings)
@@ -285,7 +290,10 @@ export class StreamDeckShell {
 
     const change = classifyGlobalSettingsChange(previous, next);
     if (!change.ok) {
-      await this.handleGlobalSettingsSchedulerChange(failClosedGlobalSettingsChange(), this.activeSchedulerKeys());
+      await this.handleGlobalSettingsSchedulerChange(
+        failClosedGlobalSettingsChange(),
+        this.activeCredentialDependentSchedulerKeys(),
+      );
       await this.log("warn", "streamdeck-global-settings-change-classification-failed", change.failure.safePublicMessage, {
         reasonCode: change.failure.diagnostics.reasonCode,
       });
@@ -398,8 +406,14 @@ export class StreamDeckShell {
     return [...schedulerKeys];
   }
 
-  private activeSchedulerKeys(): readonly SchedulerKey[] {
-    return [...new Set([...this.activeActions.values()].map((active) => active.settings.schedulerKey))];
+  private activeCredentialDependentSchedulerKeys(): readonly SchedulerKey[] {
+    return [
+      ...new Set(
+        [...this.activeActions.values()]
+          .filter((active) => active.settings.credentialProfileRef !== undefined)
+          .map((active) => active.settings.schedulerKey),
+      ),
+    ];
   }
 
   private async handleGlobalSettingsSchedulerChange(
@@ -428,19 +442,41 @@ export class StreamDeckShell {
     options?: { readonly quiet?: boolean },
   ): Promise<void> {
     try {
-      const thresholds = await this.severityThresholdsForSettings(settings);
-      const input =
-        settings.familyId === "usage"
-          ? buildUsageRendererInput({
-              actionSettings: settings,
-              schedulerOutput: output,
-              ...(thresholds === undefined ? {} : { thresholds }),
-            })
-          : buildBalanceRendererInput({
-              actionSettings: settings,
-              schedulerOutput: output,
-              ...(thresholds === undefined ? {} : { thresholds }),
-            });
+      let input: DisplayRendererInput;
+      if (settings.familyId === "status") {
+        const statusOption = resolveStatusProviderOption(settings.providerId);
+        if (statusOption === undefined) {
+          await this.log("warn", "streamdeck-key-render-failed", "Key render failed.", {
+            actionFamilyId: settings.familyId,
+            providerId: settings.providerId,
+            reasonCode: "status-provider-unavailable",
+          });
+          return;
+        }
+        input = buildStatusRendererInput({
+          providerId: statusOption.providerId,
+          schedulerOutput: output,
+        });
+      } else if (settings.familyId === "usage") {
+        const thresholds = await this.severityThresholdsForSettings(settings);
+        input = buildUsageRendererInput({
+          actionSettings: settings,
+          schedulerOutput: output,
+          ...(thresholds === undefined ? {} : { thresholds }),
+        });
+      } else if (settings.familyId === "balance") {
+        const thresholds = await this.severityThresholdsForSettings(settings);
+        input = buildBalanceRendererInput({
+          actionSettings: settings,
+          schedulerOutput: output,
+          ...(thresholds === undefined ? {} : { thresholds }),
+        });
+      } else {
+        await this.log("warn", "streamdeck-key-render-failed", "Key render failed.", {
+          reasonCode: "action-family-invalid",
+        });
+        return;
+      }
       const rendered = renderDisplayInput(input, this.now());
       // Old working layout renders everything inside the key image; a text
       // title would overlay it, so no title is set.

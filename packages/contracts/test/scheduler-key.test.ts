@@ -69,4 +69,14 @@ describe("serializeSchedulerKey", () => {
     };
     expect(serializeSchedulerKey(withoutOptionals)).toBe(serializeSchedulerKey({ ...withoutOptionals }));
   });
+
+  it("serializes Status through the unchanged five-segment key format", () => {
+    expect(
+      serializeSchedulerKey({
+        familyId: "status",
+        providerId: "anthropic-api",
+        credentialProfileId: "none",
+      }),
+    ).toBe("status|anthropic-api||none|");
+  });
 });

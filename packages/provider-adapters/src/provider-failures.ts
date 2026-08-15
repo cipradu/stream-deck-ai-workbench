@@ -5,12 +5,17 @@ import {
   type SanitizedFailure,
   type SanitizedTaggedError,
 } from "@ai-workbench/errors";
-import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+import type {
+  ProviderCapabilityMetadata,
+  StatusProviderCapabilityMetadata,
+} from "@ai-workbench/provider-registry";
 import type { SchedulerFetchResult } from "@ai-workbench/scheduler";
 
 import type { BalanceProviderNormalizationResult } from "./types.js";
 
-export function gatedFailure(capability: ProviderCapabilityMetadata): SanitizedFailure {
+export function gatedFailure(
+  capability: ProviderCapabilityMetadata | StatusProviderCapabilityMetadata,
+): SanitizedFailure {
   return mapProviderFailure(providerFailureForCapability(capability));
 }
 
@@ -105,7 +110,9 @@ export function semanticValidationFailure(
   };
 }
 
-function providerFailureForCapability(capability: ProviderCapabilityMetadata): Parameters<typeof mapProviderFailure>[0] {
+function providerFailureForCapability(
+  capability: ProviderCapabilityMetadata | StatusProviderCapabilityMetadata,
+): Parameters<typeof mapProviderFailure>[0] {
   if (capability.implementationStatus === "unsupported" || capability.sourceProofStatus === "unsupported") {
     return {
       kind: "unsupported",

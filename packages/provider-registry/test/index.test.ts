@@ -16,7 +16,9 @@ import {
   SOURCE_PROOF_STATUSES,
   deriveProviderSelectionOptions,
   findProviderEntry,
+  listProviderCapabilitiesForFamily,
   listProviderEntriesForFamily,
+  resolveProviderCapability,
   resolveProviderCoordinationPolicy,
   resolveCapabilityMetricForWindow,
 } from "../src/index.js";
@@ -26,25 +28,27 @@ function asSortedSet(values: readonly string[]): readonly string[] {
   return [...new Set(values)].sort();
 }
 
-function allCapabilities() {
+function allMetricCapabilities() {
   return PROVIDER_REGISTRY.flatMap((entry) =>
-    entry.capabilities.map((capability) => ({
-      providerId: entry.providerId,
-      productLabel: entry.productLabel,
-      ...capability,
-    })),
+    entry.capabilities
+      .filter((capability) => capability.familyId !== "status")
+      .map((capability) => ({
+        providerId: entry.providerId,
+        productLabel: entry.productLabel,
+        ...capability,
+      })),
   );
 }
 
-function firstCapability(providerId: string) {
-  const entry = findProviderEntry(providerId);
-  expect(entry).toBeDefined();
-  expect(entry?.capabilities).toHaveLength(1);
-  return entry?.capabilities[0];
+function metricCapability(providerId: string) {
+  const actionFamilyId = (USAGE_PROVIDER_IDS as readonly string[]).includes(providerId) ? "usage" : "balance";
+  const resolved = resolveProviderCapability(providerId, actionFamilyId);
+  expect(resolved).toBeDefined();
+  return resolved?.capability;
 }
 
 function expectRequiresUserProfileSeverity(providerId: string) {
-  expect(firstCapability(providerId)?.severityStrategy).toEqual({
+  expect(metricCapability(providerId)?.severityStrategy).toEqual({
     kind: "requires-user-profile",
     reason: "absolute-threshold-requires-owner-profile",
   });
@@ -65,6 +69,71 @@ function expectExactErrorMessage(operation: () => unknown, expectedMessage: stri
 }
 
 describe("provider registry catalog completeness", () => {
+  it("Moonshot resolves Balance as Moonshot and Status as Moonshot AI from one provider entry", () => {
+    expect(resolveProviderCapability("moonshot", "balance")).toMatchObject({
+      providerId: "moonshot",
+      productLabel: "Moonshot",
+      pickerLabel: "Moonshot",
+      capability: {
+        familyId: "balance",
+      },
+    });
+    expect(resolveProviderCapability("moonshot", "status")).toMatchObject({
+      providerId: "moonshot",
+      productLabel: "Moonshot",
+      pickerLabel: "Moonshot AI",
+      capability: {
+        familyId: "status",
+      },
+    });
+    expect(PROVIDER_REGISTRY.filter((entry) => entry.providerId === "moonshot")).toHaveLength(1);
+  });
+
+  it("lists exactly the four approved Status providers in approved order", () => {
+    expect(
+      listProviderCapabilitiesForFamily("status").map(({ providerId, pickerLabel }) => ({ providerId, pickerLabel })),
+    ).toEqual([
+      { providerId: "anthropic-api", pickerLabel: "Anthropic" },
+      { providerId: "openai-api", pickerLabel: "OpenAI" },
+      { providerId: "moonshot", pickerLabel: "Moonshot AI" },
+      { providerId: "minimax", pickerLabel: "MiniMax" },
+    ]);
+  });
+
+  it("keeps every Status capability credential-free and free of metric metadata", () => {
+    for (const { capability } of listProviderCapabilitiesForFamily("status")) {
+      expect(capability).toMatchObject({
+        familyId: "status",
+        actionFamilyId: "status",
+        credentialClass: "none",
+        implementationStatus: "implemented",
+        sourceProofStatus: "probeAccepted",
+      });
+      for (const absentField of [
+        "metricKind",
+        "metricDirection",
+        "displayUnit",
+        "displayBasis",
+        "coverageKind",
+        "supportedWindows",
+        "severityStrategy",
+        "categoryMetrics",
+        "credentialClasses",
+        "sensitiveSelectorRequirements",
+        "requiredSettings",
+      ]) {
+        expect(capability).not.toHaveProperty(absentField);
+      }
+    }
+  });
+
+  it("returns undefined for unsupported provider-family combinations without falling back to another capability", () => {
+    expect(resolveProviderCapability("deepseek", "status")).toBeUndefined();
+    expect(resolveProviderCapability("zai-coding-plan", "status")).toBeUndefined();
+    expect(resolveProviderCapability("moonshot", "usage")).toBeUndefined();
+    expect(resolveProviderCapability("minimax", "balance")).toBeUndefined();
+  });
+
   it("contains exactly the first Usage provider catalog", () => {
     expect(asSortedSet(listProviderEntriesForFamily("usage").map((entry) => entry.providerId))).toEqual(
       asSortedSet(USAGE_PROVIDER_IDS),
@@ -87,21 +156,21 @@ describe("provider registry catalog completeness", () => {
 
 describe("provider registry metadata derives shared contract truth", () => {
   it("declares accepted source fan-out for compatible Claude Code and Kimi Code categories", () => {
-    expect(firstCapability("claude-code")?.supportedWindows).toEqual([
+    expect(metricCapability("claude-code")?.supportedWindows).toEqual([
       "five-hour",
       "seven-day",
       "fable",
       "credit-spend",
     ]);
-    expect(firstCapability("claude-code")?.coordinationPolicy).toEqual({
+    expect(metricCapability("claude-code")?.coordinationPolicy).toEqual({
       rateLimitDomain: "provider-profile",
       sourceIdentity: "adapter-declared",
       sourceSharing: "fan-out",
       rateLimitDomainEvidence: { status: "not-required" },
       sourceSharingEvidence: { status: "accepted", source: "local-source" },
     });
-    expect(firstCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
-    expect(firstCapability("kimi-code")?.coordinationPolicy).toEqual({
+    expect(metricCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
+    expect(metricCapability("kimi-code")?.coordinationPolicy).toEqual({
       rateLimitDomain: "provider-profile",
       sourceIdentity: "adapter-declared",
       sourceSharing: "fan-out",
@@ -119,7 +188,7 @@ describe("provider registry metadata derives shared contract truth", () => {
       sourceSharingEvidence: { status: "not-required" },
     });
 
-    for (const capability of allCapabilities().filter(
+    for (const capability of allMetricCapabilities().filter(
       (capability) => capability.providerId !== "claude-code" && capability.providerId !== "kimi-code",
     )) {
       expect(capability.coordinationPolicy).toEqual({
@@ -207,21 +276,21 @@ describe("provider registry metadata derives shared contract truth", () => {
   });
 
   it("derives every metric direction and display unit from contract maps", () => {
-    for (const capability of allCapabilities()) {
+    for (const capability of allMetricCapabilities()) {
       expect(capability.metricDirection).toBe(METRIC_KIND_DIRECTION[capability.metricKind]);
       expect(capability.displayUnit).toBe(METRIC_KIND_UNIT[capability.metricKind]);
     }
   });
 
   it("marks every first-catalog provider implemented while preserving proof status metadata", () => {
-    const implementedProviderIds = allCapabilities()
+    const implementedProviderIds = allMetricCapabilities()
       .filter((capability) => capability.implementationStatus === "implemented")
       .map((capability) => capability.providerId);
 
     expect(asSortedSet(implementedProviderIds)).toEqual(asSortedSet([...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS]));
 
     for (const providerId of ["claude-code", "codex", "kimi-code"] as const) {
-      const capability = firstCapability(providerId);
+      const capability = metricCapability(providerId);
       expect(capability?.implementationStatus).toBe("implemented");
       expect(capability?.sourceProofStatus).toBe("probeAccepted");
       expect(capability).not.toHaveProperty("unavailableReason");
@@ -264,7 +333,7 @@ describe("provider registry metadata derives shared contract truth", () => {
 describe("Usage provider gates and windows", () => {
   it("models Claude Code, Codex, and Kimi Code as local-source Usage providers with percentage windows", () => {
     for (const providerId of ["claude-code", "codex", "kimi-code"] as const) {
-      const capability = firstCapability(providerId);
+      const capability = metricCapability(providerId);
       expect(capability?.actionFamilyId).toBe("usage");
       expect(capability?.metricKind).toBe("usage-percent");
       expect(capability?.credentialClasses).toEqual(["local-read-only-source"]);
@@ -273,15 +342,15 @@ describe("Usage provider gates and windows", () => {
     }
     // Claude Code additionally offers the "fable" weekly scoped usage window
     // and the "credit-spend" extra-usage money guard.
-    expect(firstCapability("claude-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "fable", "credit-spend"]);
+    expect(metricCapability("claude-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "fable", "credit-spend"]);
     // Codex additionally offers the evergreen "credits" and "resets"
     // categories.
-    expect(firstCapability("codex")?.supportedWindows).toEqual(["five-hour", "seven-day", "credits", "resets"]);
-    expect(firstCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
+    expect(metricCapability("codex")?.supportedWindows).toEqual(["five-hour", "seven-day", "credits", "resets"]);
+    expect(metricCapability("kimi-code")?.supportedWindows).toEqual(["five-hour", "seven-day", "extra-usage"]);
   });
 
   it("resolves the Codex credits category to a lower-bound usage-credits metric with a no-default severity strategy", () => {
-    const capability = firstCapability("codex");
+    const capability = metricCapability("codex");
     expect(capability).toBeDefined();
     if (capability === undefined) {
       return;
@@ -303,7 +372,7 @@ describe("Usage provider gates and windows", () => {
     expect(fiveHour.severityStrategy).toEqual({ kind: "registry-default", reference: "upper-bound-usage-percent-default" });
 
     // Claude Code has no credits category — its credits resolution falls back to the default metric.
-    const claudeCode = firstCapability("claude-code");
+    const claudeCode = metricCapability("claude-code");
     expect(claudeCode).toBeDefined();
     if (claudeCode !== undefined) {
       expect(resolveCapabilityMetricForWindow(claudeCode, "credits").metricKind).toBe("usage-percent");
@@ -311,7 +380,7 @@ describe("Usage provider gates and windows", () => {
   });
 
   it("resolves the Codex resets category to a lower-bound usage-resets count metric with the registry-default days-runway severity strategy", () => {
-    const capability = firstCapability("codex");
+    const capability = metricCapability("codex");
     expect(capability).toBeDefined();
     if (capability === undefined) {
       return;
@@ -329,7 +398,7 @@ describe("Usage provider gates and windows", () => {
     });
 
     // Claude Code has no resets category — its resets resolution falls back to the default metric.
-    const claudeCode = firstCapability("claude-code");
+    const claudeCode = metricCapability("claude-code");
     expect(claudeCode).toBeDefined();
     if (claudeCode !== undefined) {
       expect(resolveCapabilityMetricForWindow(claudeCode, "resets").metricKind).toBe("usage-percent");
@@ -337,7 +406,7 @@ describe("Usage provider gates and windows", () => {
   });
 
   it("resolves the claude-code fable category to the default upper-bound usage-percent metric (no override) and offers it only for claude-code", () => {
-    const capability = firstCapability("claude-code");
+    const capability = metricCapability("claude-code");
     expect(capability).toBeDefined();
     if (capability === undefined) {
       return;
@@ -356,12 +425,12 @@ describe("Usage provider gates and windows", () => {
 
     // Only Claude Code declares the fable window — codex/z.ai/minimax must not offer it.
     for (const otherUsageProvider of ["codex", "kimi-code", "zai-coding-plan", "minimax"] as const) {
-      expect(firstCapability(otherUsageProvider)?.supportedWindows?.includes("fable")).not.toBe(true);
+      expect(metricCapability(otherUsageProvider)?.supportedWindows?.includes("fable")).not.toBe(true);
     }
   });
 
   it("resolves the claude-code credit-spend category to an upper-bound usage-spend money metric with a no-default severity strategy, only for claude-code", () => {
-    const capability = firstCapability("claude-code");
+    const capability = metricCapability("claude-code");
     expect(capability).toBeDefined();
     if (capability === undefined) {
       return;
@@ -381,13 +450,13 @@ describe("Usage provider gates and windows", () => {
 
     // Only Claude Code declares the credit-spend window; the others fall back to the default metric.
     for (const otherUsageProvider of ["codex", "kimi-code", "zai-coding-plan", "minimax"] as const) {
-      expect(firstCapability(otherUsageProvider)?.supportedWindows?.includes("credit-spend")).not.toBe(true);
-      expect(resolveCapabilityMetricForWindow(firstCapability(otherUsageProvider)!, "credit-spend").metricKind).toBe("usage-percent");
+      expect(metricCapability(otherUsageProvider)?.supportedWindows?.includes("credit-spend")).not.toBe(true);
+      expect(resolveCapabilityMetricForWindow(metricCapability(otherUsageProvider)!, "credit-spend").metricKind).toBe("usage-percent");
     }
   });
 
   it("resolves Kimi Code Extra Usage to the existing upper-bound usage-spend contract", () => {
-    const capability = firstCapability("kimi-code");
+    const capability = metricCapability("kimi-code");
     expect(capability).toBeDefined();
     if (capability === undefined) {
       return;
@@ -404,7 +473,7 @@ describe("Usage provider gates and windows", () => {
   });
 
   it("models z.ai as probe-accepted direct-key usage for five-hour and monthly MCP windows (weekly hidden — z.ai returns no weekly tier)", () => {
-    const capability = firstCapability("zai-coding-plan");
+    const capability = metricCapability("zai-coding-plan");
     expect(capability?.actionFamilyId).toBe("usage");
     expect(capability?.supportedWindows).toEqual(["five-hour", "monthly-mcp"]);
     expect(capability?.credentialClasses).toEqual(["plugin-api-key"]);
@@ -417,7 +486,7 @@ describe("Usage provider gates and windows", () => {
     const entry = findProviderEntry("minimax");
     expect(entry?.productLabel).toBe("MiniMax");
 
-    const capability = firstCapability("minimax");
+    const capability = metricCapability("minimax");
     expect(capability?.actionFamilyId).toBe("usage");
     expect(capability?.supportedWindows).toEqual(["five-hour", "seven-day"]);
     expect(capability?.credentialClasses).toEqual(["plugin-api-key"]);
@@ -456,7 +525,7 @@ describe("Balance metric truth matrix", () => {
     } as const;
 
     for (const [providerId, [metricKind, coverageKind, sourceProofStatus]] of Object.entries(expected)) {
-      const capability = firstCapability(providerId);
+      const capability = metricCapability(providerId);
       expect(capability?.actionFamilyId).toBe("balance");
       expect(capability?.metricKind).toBe(metricKind);
       expect(capability?.coverageKind).toBe(coverageKind);
@@ -467,34 +536,34 @@ describe("Balance metric truth matrix", () => {
 
   it("implements Anthropic and Tavily with their researched Balance metric truth", () => {
     for (const providerId of ["anthropic-api", "tavily"] as const) {
-      const capability = firstCapability(providerId);
+      const capability = metricCapability(providerId);
 
       expect(capability?.actionFamilyId).toBe("balance");
       expect(capability?.implementationStatus).toBe("implemented");
       expect(capability?.sourceProofStatus).toBe("probeAccepted");
     }
 
-    expect(firstCapability("anthropic-api")?.metricKind).toBe("current-month-spend");
-    expect(firstCapability("anthropic-api")?.coverageKind).toBe("month-to-date");
-    expect(firstCapability("tavily")?.metricKind).toBe("remaining-credits");
-    expect(firstCapability("tavily")?.coverageKind).toBe("evergreen");
+    expect(metricCapability("anthropic-api")?.metricKind).toBe("current-month-spend");
+    expect(metricCapability("anthropic-api")?.coverageKind).toBe("month-to-date");
+    expect(metricCapability("tavily")?.metricKind).toBe("remaining-credits");
+    expect(metricCapability("tavily")?.coverageKind).toBe("evergreen");
   });
 
   it("keeps Runpod as current-period spend/usage only, never remaining balance", () => {
-    const capability = firstCapability("runpod");
+    const capability = metricCapability("runpod");
     expect(capability?.metricKind).toBe("current-period-spend");
     expect(capability?.metricKind).not.toBe("remaining-balance");
     expect(capability?.coverageKind).toBe("current-period");
   });
 
   it("implements ElevenLabs and keeps Jina marked as probe-sourced", () => {
-    expect(firstCapability("elevenlabs")?.metricKind).toBe("remaining-characters");
-    expect(firstCapability("elevenlabs")?.implementationStatus).toBe("implemented");
-    expect(firstCapability("elevenlabs")?.sourceProofStatus).toBe("probeAccepted");
+    expect(metricCapability("elevenlabs")?.metricKind).toBe("remaining-characters");
+    expect(metricCapability("elevenlabs")?.implementationStatus).toBe("implemented");
+    expect(metricCapability("elevenlabs")?.sourceProofStatus).toBe("probeAccepted");
 
-    expect(firstCapability("jina")?.metricKind).toBe("remaining-tokens");
-    expect(firstCapability("jina")?.implementationStatus).toBe("implemented");
-    expect(firstCapability("jina")?.sourceProofStatus).toBe("probeAccepted");
+    expect(metricCapability("jina")?.metricKind).toBe("remaining-tokens");
+    expect(metricCapability("jina")?.implementationStatus).toBe("implemented");
+    expect(metricCapability("jina")?.sourceProofStatus).toBe("probeAccepted");
   });
 
   it("does not invent registry severity defaults for absolute non-money units", () => {
@@ -511,6 +580,7 @@ describe("registry-derived provider selection and onboarding", () => {
     productLabel: "Future Balance Provider",
     capabilities: [
       {
+        familyId: "balance",
         actionFamilyId: "balance",
         adapterBindingId: "balance.future-provider",
         coordinationPolicy: DEFAULT_PROVIDER_COORDINATION_POLICY,

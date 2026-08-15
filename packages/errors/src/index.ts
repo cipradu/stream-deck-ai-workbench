@@ -106,6 +106,7 @@ export type ResponseDiagnosticExpectedType = (typeof RESPONSE_DIAGNOSTIC_EXPECTE
 
 export const RESPONSE_DIAGNOSTIC_CODES = [
   "response-body-unreadable",
+  "response-body-too-large",
   "response-body-empty",
   "response-body-not-json",
   "response-json-schema-mismatch",
@@ -154,6 +155,7 @@ const RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS: Readonly<
   Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogDefinition>
 > = Object.freeze({
   "response-body-unreadable": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "response-body-too-large": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
   "response-body-empty": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
   "response-body-not-json": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
   "response-json-schema-mismatch": RESPONSE_DIAGNOSTIC_ENTRY_NONE,

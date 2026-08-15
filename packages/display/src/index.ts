@@ -4,13 +4,17 @@ import {
   type DisplayUnit,
   type ErrorCategory,
   type MetricDirection,
-  type NormalizedSnapshot,
+  type MetricSnapshot,
+  type ProviderStatusIndicator,
   type RendererInput,
   type RetryClass,
   type SeverityState,
   type SeverityThresholdBasis,
   type SeverityThresholdSet,
   type SnapshotCoverage,
+  type StatusIncidentImpact,
+  type StatusProviderId,
+  type StatusTone,
   type UsageWindowId,
 } from "@ai-workbench/contracts";
 import {
@@ -132,7 +136,7 @@ export interface SeverityEvaluation {
 }
 
 export interface FormatDisplayValueInput {
-  readonly snapshot: NormalizedSnapshot;
+  readonly snapshot: MetricSnapshot;
   readonly capability?: ProviderCapabilityMetadata;
   readonly displayPreferences?: DisplayPreferences;
   readonly currencyCode?: string;
@@ -173,21 +177,9 @@ export interface DisplayFailureContext {
 
 export type DisplayFreshness = "fresh" | "stale" | "degraded";
 
-export interface DisplayRendererInput extends RendererInput {
+interface DisplayRendererInputCommon {
   readonly headerLabel?: string;
-  readonly rendererSeverityState: RendererSeverityState;
   readonly freshness: DisplayFreshness;
-  readonly valueLabel?: string;
-  readonly unit?: DisplayUnit;
-  readonly displayBasis?: DisplayBasis;
-  readonly displayValue?: number;
-  readonly severityBasisValue?: number;
-  readonly unitRowText?: string;
-  readonly coverageMarker?: string;
-  /** Dim secondary line under the gauge value (the credit-spend "$used / $cap" money pair). */
-  readonly secondaryLine?: string;
-  /** Non-gauge status tone for the credit-spend off/out-of-credits states: neutral (dim) or critical (red). */
-  readonly statusTone?: SpendStatusTone;
   readonly staleReason?: SchedulerStaleReason;
   readonly failureContext?: DisplayFailureContext;
   /** Static display-owned label for a retained failed-refresh stale key. */
@@ -204,6 +196,21 @@ export interface DisplayRendererInput extends RendererInput {
   readonly authExpiredHint?: string;
   /** Provider id for renderer-side artwork lookup; carries no account data. */
   readonly providerId?: string;
+}
+
+export interface MetricDisplayRendererInput extends RendererInput, DisplayRendererInputCommon {
+  readonly rendererSeverityState: RendererSeverityState;
+  readonly valueLabel?: string;
+  readonly unit?: DisplayUnit;
+  readonly displayBasis?: DisplayBasis;
+  readonly displayValue?: number;
+  readonly severityBasisValue?: number;
+  readonly unitRowText?: string;
+  readonly coverageMarker?: string;
+  /** Dim secondary line under the gauge value (the credit-spend "$used / $cap" money pair). */
+  readonly secondaryLine?: string;
+  /** Non-gauge status tone for the credit-spend off/out-of-credits states: neutral (dim) or critical (red). */
+  readonly statusTone?: SpendStatusTone;
   /** Action family so degraded output can keep family-specific copy. */
   readonly actionFamilyId?: "balance" | "usage";
   /** Rolling Usage window carried into presentation-only rendering decisions. */
@@ -211,6 +218,41 @@ export interface DisplayRendererInput extends RendererInput {
   /** True when the snapshot came from a read-only local fallback source; renderers keep the old stale-badge honesty. */
   readonly sourceFallback?: boolean;
 }
+
+export interface StatusDisplayModel {
+  readonly actionFamilyId: "status";
+  readonly providerId: StatusProviderId;
+  readonly activeIncidentCount: number;
+  readonly highestImpact?: StatusIncidentImpact;
+  readonly providerStatusIndicator?: ProviderStatusIndicator;
+  readonly tone: StatusTone;
+  readonly valueText: string;
+  readonly fetchedAtEpochMs: number;
+}
+
+export interface StatusValueRendererInput extends DisplayRendererInputCommon {
+  readonly actionFamilyId: "status";
+  readonly providerId: StatusProviderId;
+  readonly activeIncidentCount: number;
+  readonly highestImpact?: StatusIncidentImpact;
+  readonly statusDisplayTone: StatusTone;
+  readonly valueText: string;
+  readonly displayState: "fresh" | "stale";
+  readonly stale: boolean;
+  readonly freshness: "fresh" | "stale";
+}
+
+export interface StatusDegradedRendererInput extends DisplayRendererInputCommon {
+  readonly actionFamilyId: "status";
+  readonly providerId?: StatusProviderId;
+  readonly valueText: string;
+  readonly displayState: DisplayState;
+  readonly stale: false;
+  readonly freshness: "degraded";
+}
+
+export type StatusDisplayRendererInput = StatusValueRendererInput | StatusDegradedRendererInput;
+export type DisplayRendererInput = MetricDisplayRendererInput | StatusDisplayRendererInput;
 
 export interface BuildRendererInputOptions {
   readonly schedulerOutput: SchedulerOutput;
@@ -233,6 +275,13 @@ export interface BuildRendererInputOptions {
    */
   readonly severityStrategy?: SeverityStrategy;
   readonly currencyCode?: string;
+}
+
+export interface BuildStatusRendererInputOptions {
+  readonly schedulerOutput: SchedulerOutput;
+  readonly statusDisplayInput?: StatusDisplayModel;
+  readonly headerLabel?: string;
+  readonly providerId?: StatusProviderId;
 }
 
 export function resolveSeverityThresholds(input: ResolveSeverityThresholdsInput): ResolvedSeverityThresholds {
@@ -459,7 +508,7 @@ export function formatCoverageMarker(coverage: SnapshotCoverage): string | undef
   }
 }
 
-export function buildRendererInput(input: BuildRendererInputOptions): DisplayRendererInput {
+export function buildRendererInput(input: BuildRendererInputOptions): MetricDisplayRendererInput {
   const snapshot = input.schedulerOutput.snapshot;
   if (snapshot === undefined) {
     return degradedRendererInput(input.schedulerOutput, {
@@ -468,6 +517,9 @@ export function buildRendererInput(input: BuildRendererInputOptions): DisplayRen
       ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
       ...(input.actionFamilyId === undefined ? {} : { actionFamilyId: input.actionFamilyId }),
     });
+  }
+  if (snapshot.familyId === "status") {
+    throw new Error("Status display is not implemented.");
   }
 
   const capability = input.capability ?? findDisplayCapabilityForSnapshot(snapshot);
@@ -526,7 +578,51 @@ export function buildRendererInput(input: BuildRendererInputOptions): DisplayRen
   };
 }
 
-function headerLabelForSnapshot(snapshot: NormalizedSnapshot, displayPreferences: DisplayPreferences | undefined): string {
+export function buildStatusRendererInput(input: BuildStatusRendererInputOptions): StatusDisplayRendererInput {
+  const snapshot = input.schedulerOutput.snapshot;
+  if (snapshot === undefined) {
+    return degradedStatusRendererInput(input.schedulerOutput, {
+      ...(input.headerLabel === undefined ? {} : { headerLabel: input.headerLabel }),
+      ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
+    });
+  }
+
+  if (snapshot.familyId !== "status" || input.statusDisplayInput === undefined) {
+    return degradedStatusRendererInput(
+      input.schedulerOutput,
+      {
+        ...(input.headerLabel === undefined ? {} : { headerLabel: input.headerLabel }),
+        ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
+      },
+      "validation-drift",
+    );
+  }
+
+  const displayInput = input.statusDisplayInput;
+  const failureContext = failureContextFromSchedulerOutput(input.schedulerOutput);
+  const isStale = input.schedulerOutput.displayState === "stale";
+  const failureIndicator =
+    isStale && input.schedulerOutput.staleReason === "refresh-failed" ? staleFailureIndicatorFromContext(failureContext) : undefined;
+
+  return {
+    actionFamilyId: "status",
+    providerId: displayInput.providerId,
+    activeIncidentCount: displayInput.activeIncidentCount,
+    ...(displayInput.highestImpact === undefined ? {} : { highestImpact: displayInput.highestImpact }),
+    statusDisplayTone: displayInput.tone,
+    valueText: displayInput.valueText,
+    displayState: isStale ? "stale" : "fresh",
+    stale: isStale,
+    freshness: isStale ? "stale" : "fresh",
+    fetchedAtEpochMs: displayInput.fetchedAtEpochMs,
+    ...(input.headerLabel === undefined ? {} : { headerLabel: input.headerLabel }),
+    ...(input.schedulerOutput.staleReason === undefined ? {} : { staleReason: input.schedulerOutput.staleReason }),
+    ...(failureContext === undefined ? {} : { failureContext }),
+    ...(failureIndicator === undefined ? {} : { failureIndicator }),
+  };
+}
+
+function headerLabelForSnapshot(snapshot: MetricSnapshot, displayPreferences: DisplayPreferences | undefined): string {
   if (displayPreferences?.label !== undefined && displayPreferences.label.trim().length > 0) {
     return displayPreferences.label.trim();
   }
@@ -589,7 +685,7 @@ export function headerLabelForActionSettings(input: {
   return `${providerLabel} · ${usageWindowShortLabel(input.windowOrPeriod)}`;
 }
 
-export function findDisplayCapabilityForSnapshot(snapshot: NormalizedSnapshot): ProviderCapabilityMetadata | undefined {
+export function findDisplayCapabilityForSnapshot(snapshot: MetricSnapshot): ProviderCapabilityMetadata | undefined {
   return findProviderEntry(snapshot.providerId)?.capabilities.find(
     (capability) =>
       capability.actionFamilyId === snapshot.familyId &&
@@ -683,7 +779,7 @@ function thresholdBasisForDisplayUnit(unit: DisplayUnit): SeverityThresholdBasis
 }
 
 function formatted(input: {
-  readonly snapshot: NormalizedSnapshot;
+  readonly snapshot: MetricSnapshot;
   readonly displayBasis: DisplayBasis;
   readonly displayValue: number;
   readonly severityBasisValue: number;
@@ -811,14 +907,14 @@ const MILLIS_PER_DAY = 86_400_000;
  * expiry (count 0, or a positive count with no future expiry): no runway → the severity engine's
  * invalid-value path → not-evaluated → normal tone, never amber/red.
  */
-function resetsDaysRemaining(snapshot: NormalizedSnapshot): number {
+function resetsDaysRemaining(snapshot: MetricSnapshot): number {
   if (snapshot.resetsAtEpochMs === undefined) {
     return Number.NaN;
   }
   return Math.max(0, (snapshot.resetsAtEpochMs - snapshot.fetchedAtEpochMs) / MILLIS_PER_DAY);
 }
 
-function inferDisplayBasis(snapshot: NormalizedSnapshot): DisplayBasis {
+function inferDisplayBasis(snapshot: MetricSnapshot): DisplayBasis {
   if (snapshot.metricKind === "usage-percent") {
     return "bounded-percentage";
   }
@@ -920,7 +1016,7 @@ function degradedRendererInput(
     readonly providerId?: string;
     readonly actionFamilyId?: "balance" | "usage";
   },
-): DisplayRendererInput {
+): MetricDisplayRendererInput {
   const failureContext = failureContextFromSchedulerOutput(schedulerOutput);
 
   return {
@@ -934,6 +1030,28 @@ function degradedRendererInput(
     ...(context?.authExpiredHint === undefined ? {} : { authExpiredHint: context.authExpiredHint }),
     ...(context?.providerId === undefined ? {} : { providerId: context.providerId }),
     ...(context?.actionFamilyId === undefined ? {} : { actionFamilyId: context.actionFamilyId }),
+    ...(failureContext === undefined ? {} : { failureContext }),
+  };
+}
+
+function degradedStatusRendererInput(
+  schedulerOutput: SchedulerOutput,
+  context: {
+    readonly headerLabel?: string;
+    readonly providerId?: StatusProviderId;
+  },
+  displayState: DisplayState = schedulerOutput.displayState,
+): StatusDegradedRendererInput {
+  const failureContext = failureContextFromSchedulerOutput(schedulerOutput);
+
+  return {
+    actionFamilyId: "status",
+    valueText: valueTextForDegradedState(displayState),
+    displayState,
+    stale: false,
+    freshness: "degraded",
+    ...(context.headerLabel === undefined ? {} : { headerLabel: context.headerLabel }),
+    ...(context.providerId === undefined ? {} : { providerId: context.providerId }),
     ...(failureContext === undefined ? {} : { failureContext }),
   };
 }

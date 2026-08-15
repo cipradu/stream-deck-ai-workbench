@@ -10,7 +10,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "pnpm -r run typecheck",
-    "build": "pnpm -r run build"
+    "build": "pnpm -r run build",
+    "verify:unit016": "node tooling/verification/unit016-verify.mjs"
   },
   "devDependencies": {
     "@elgato/cli": "1.7.4",

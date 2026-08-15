@@ -284,6 +284,7 @@ class CentralScheduler implements Scheduler {
   private readonly runtime: ManagedRuntime.ManagedRuntime<never, never>;
   private readonly ownsRuntime: boolean;
   private shutdownRequested = false;
+  private shutdownBarrier: Promise<void> | undefined;
   /** The single output-change listener, set by {@link onOutputChanged}. One consumer (the
    * shell), so a single slot — not a listener list. Read lazily by each entry's `notifyOutputChanged`.
    * Typed `| undefined` (not `?`) so unsubscribe can clear it under `exactOptionalPropertyTypes`. */
@@ -463,18 +464,34 @@ class CentralScheduler implements Scheduler {
     };
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownBarrier !== undefined) {
+      return this.shutdownBarrier;
+    }
     this.shutdownRequested = true;
+    this.shutdownBarrier = Promise.resolve().then(() => this.performShutdown());
+    return this.shutdownBarrier;
+  }
+
+  private async performShutdown(): Promise<void> {
     const fibers: Fiber.RuntimeFiber<void, never>[] = [];
+    const pendingInterrupts: Fiber.RuntimeFiber<unknown, never>[] = [];
     for (const entry of this.entries.values()) {
       if (entry.fiber !== undefined) {
         fibers.push(entry.fiber);
         delete entry.fiber;
       }
+      if (entry.interruptFiber !== undefined) {
+        pendingInterrupts.push(entry.interruptFiber);
+        delete entry.interruptFiber;
+      }
       entry.activeInstances.clear();
     }
     if (fibers.length > 0) {
       await this.runtime.runPromise(Fiber.interruptAll(fibers));
+    }
+    if (pendingInterrupts.length > 0) {
+      await this.runtime.runPromise(Effect.forEach(pendingInterrupts, Fiber.await, { discard: true }));
     }
     if (this.ownsRuntime) {
       await this.runtime.dispose();
@@ -517,7 +534,8 @@ class CentralScheduler implements Scheduler {
   }
 
   private interruptFiber(entry: KeyEntry): void {
-    const fiber = entry.fiber;
+    const currentFiber = entry.fiber;
+    const priorBarrier = entry.interruptFiber;
     // A superseded fiber leaves no armed healthy sleep / next-poll behind.
     if (entry.healthyWake !== undefined) {
       delete entry.healthyWake;
@@ -525,15 +543,18 @@ class CentralScheduler implements Scheduler {
     if (entry.nextHealthyPollAtEpochMs !== undefined) {
       delete entry.nextHealthyPollAtEpochMs;
     }
-    if (fiber === undefined) {
+    if (currentFiber === undefined) {
       return;
     }
     delete entry.fiber;
-    // Track the interrupt fiber. `Fiber.interrupt` cancels the fiber's in-flight fetch (the
-    // adapter Effect is interruptible) AND completes only after all finalizers run — so a re-fork that
-    // awaits this is guaranteed the old fetch is fully torn down before it polls. Forking keeps the
-    // caller (deactivate / settings-change) synchronous.
-    entry.interruptFiber = this.runtime.runFork(Fiber.interrupt(fiber));
+    // Track one transitive cleanup barrier. Interrupt the current fiber promptly while concurrently
+    // awaiting any predecessor barrier; repeated replacement composes the full cleanup chain. The
+    // retained barrier is only awaited by replacement/shutdown and is never itself interrupted.
+    entry.interruptFiber = this.runtime.runFork(
+      priorBarrier === undefined
+        ? Fiber.interrupt(currentFiber)
+        : Effect.zip(Fiber.interrupt(currentFiber), Fiber.await(priorBarrier), { concurrent: true }).pipe(Effect.asVoid),
+    );
   }
 
   /**

@@ -12,13 +12,18 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  BALANCE_METRIC_KINDS,
   BALANCE_PROVIDER_IDS,
   METRIC_KIND_DIRECTION,
   METRIC_KIND_UNIT,
+  STATUS_PROVIDER_IDS,
   USAGE_PROVIDER_IDS,
   serializeSchedulerKey,
+  type BalanceMetricKind,
   type BalanceProviderId,
+  type BalanceSnapshot,
   type CoverageKind,
+  type MetricSnapshot,
   type NormalizedSnapshot,
   type ProviderId,
   type SchedulerKeyParts,
@@ -68,13 +73,13 @@ import { zaiCodingPlanUsageProviderModule } from "../src/providers/usage/zai-cod
 const sourceRoot = fileURLToPath(new URL("../src", import.meta.url));
 
 function providerModulePaths(
-  familyId: "usage" | "balance",
+  familyId: "usage" | "balance" | "status",
   providerIds: readonly string[],
 ): readonly string[] {
   return providerIds.map((providerId) => join(sourceRoot, "providers", familyId, providerId, "index.ts"));
 }
 
-function providerCapabilityEntries(familyId: "usage" | "balance"): readonly string[] {
+function providerCapabilityEntries(familyId: "usage" | "balance" | "status"): readonly string[] {
   const familyRoot = join(sourceRoot, "providers", familyId);
   if (!existsSync(familyRoot)) {
     return [];
@@ -107,6 +112,7 @@ function isExpectedProviderModule(modulePath: string): boolean {
   const expectedModules = new Set([
     ...providerModulePaths("usage", USAGE_PROVIDER_IDS),
     ...providerModulePaths("balance", BALANCE_PROVIDER_IDS),
+    ...providerModulePaths("status", STATUS_PROVIDER_IDS),
   ]);
 
   return expectedModules.has(modulePath);
@@ -116,6 +122,7 @@ function isProviderFamilyIndex(modulePath: string): boolean {
   return (
     modulePath === join(sourceRoot, "providers", "usage", "index.ts") ||
     modulePath === join(sourceRoot, "providers", "balance", "index.ts") ||
+    modulePath === join(sourceRoot, "providers", "status", "index.ts") ||
     modulePath === join(sourceRoot, "providers", "index.ts")
   );
 }
@@ -198,7 +205,7 @@ function normalize(providerId: BalanceProviderId, response: unknown) {
 function expectNormalizedSnapshot(input: {
   readonly providerId: BalanceProviderId;
   readonly response: unknown;
-  readonly metricKind: NormalizedSnapshot["metricKind"];
+  readonly metricKind: BalanceMetricKind;
   readonly coverageKind: CoverageKind;
   readonly value: number;
   readonly currencyCode?: string;
@@ -221,21 +228,28 @@ function expectNormalizedSnapshot(input: {
   });
 }
 
-function fakeBalanceSnapshot(providerId: BalanceProviderId): NormalizedSnapshot {
+function fakeBalanceSnapshot(providerId: BalanceProviderId): BalanceSnapshot {
   const capability = balanceCapability(providerId);
+  if (!isBalanceMetricKind(capability.metricKind)) {
+    throw new Error(`Expected a Balance metric kind for ${providerId}`);
+  }
   return {
     familyId: "balance",
     providerId,
-    metricKind: capability.metricKind as NormalizedSnapshot["metricKind"],
+    metricKind: capability.metricKind,
     metricDirection: METRIC_KIND_DIRECTION[capability.metricKind],
     unit: METRIC_KIND_UNIT[capability.metricKind],
     coverage: coverageForKind(capability.coverageKind),
     value: 10,
     fetchedAtEpochMs: 1,
-  } as NormalizedSnapshot;
+  };
 }
 
-function coverageForKind(coverageKind: CoverageKind): NormalizedSnapshot["coverage"] {
+function isBalanceMetricKind(metricKind: MetricSnapshot["metricKind"]): metricKind is BalanceMetricKind {
+  return BALANCE_METRIC_KINDS.some((candidate) => candidate === metricKind);
+}
+
+function coverageForKind(coverageKind: CoverageKind): MetricSnapshot["coverage"] {
   switch (coverageKind) {
     case "month-to-date":
       return { kind: "month-to-date" };
@@ -1916,7 +1930,10 @@ describe("claude-code Effect-native usage adapter", () => {
       },
     });
     if (result.ok) {
-      expect(result.snapshot.value).not.toBe(11);
+      expect(result.snapshot.familyId).toBe("usage");
+      if (result.snapshot.familyId === "usage") {
+        expect(result.snapshot.value).not.toBe(11);
+      }
     }
     // One HTTP attempt against the SAME OAuth usage endpoint (no separate Fable call).
     expect(captured).toHaveLength(1);
@@ -1940,7 +1957,10 @@ describe("claude-code Effect-native usage adapter", () => {
     });
     // 0% inactive is a REAL 0 (green), and a null reset yields NO countdown.
     if (result.ok) {
-      expect(result.snapshot.value).toBe(0);
+      expect(result.snapshot.familyId).toBe("usage");
+      if (result.snapshot.familyId === "usage") {
+        expect(result.snapshot.value).toBe(0);
+      }
       expect(result.snapshot).not.toHaveProperty("resetsAtEpochMs");
     }
   });
@@ -3384,11 +3404,12 @@ describe("codex Effect-native usage adapter", () => {
 });
 
 describe("provider capability module structure", () => {
-  it("keeps one self-contained provider capability module folder per first Usage and Balance provider", () => {
+  it("keeps one self-contained provider capability module folder per approved provider family", () => {
     const usageProviderModules = providerModulePaths("usage", USAGE_PROVIDER_IDS);
     const balanceProviderModules = providerModulePaths("balance", BALANCE_PROVIDER_IDS);
+    const statusProviderModules = providerModulePaths("status", STATUS_PROVIDER_IDS);
 
-    for (const modulePath of [...usageProviderModules, ...balanceProviderModules]) {
+    for (const modulePath of [...usageProviderModules, ...balanceProviderModules, ...statusProviderModules]) {
       expect(existsSync(modulePath), `${relative(sourceRoot, modulePath)} should exist`).toBe(true);
     }
 
@@ -3407,6 +3428,13 @@ describe("provider capability module structure", () => {
       "runpod",
       "speechmatics",
       "tavily",
+    ]);
+    expect(providerCapabilityEntries("status")).toEqual([
+      "anthropic-api",
+      "index.ts",
+      "minimax",
+      "moonshot",
+      "openai-api",
     ]);
   });
 

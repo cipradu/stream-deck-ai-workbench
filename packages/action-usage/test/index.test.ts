@@ -198,6 +198,22 @@ describe("Usage catalog and source gates", () => {
       },
     });
   });
+
+  it("resolves MiniMax Usage from its Usage capability when the provider also has Status", () => {
+    expect(resolveUsageProviderOption({ providerId: "minimax", windowOrPeriod: "five-hour" })).toMatchObject({
+      ok: true,
+      value: {
+        providerId: "minimax",
+        productLabel: "MiniMax",
+        actionFamilyId: "usage",
+        capability: {
+          familyId: "usage",
+          actionFamilyId: "usage",
+          metricKind: "usage-percent",
+        },
+      },
+    });
+  });
 });
 
 describe("source-gated Usage scheduler and display output", () => {

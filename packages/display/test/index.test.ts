@@ -2,19 +2,27 @@ import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import {
+  BALANCE_PROVIDER_IDS,
   ERROR_CATEGORIES,
+  USAGE_PROVIDER_IDS,
+  type BalanceProviderId,
+  type BalanceSnapshot,
   type DisplayState,
   type ErrorCategory,
-  type NormalizedSnapshot,
+  type MetricSnapshot,
   type ProviderId,
   type RetryClass,
   type SeverityThresholdSet,
+  type StatusSnapshot,
+  type UsagePercentSnapshot,
+  type UsageProviderId,
 } from "../../contracts/src/index.js";
 import { findProviderEntry, type ProviderCapabilityMetadata } from "../../provider-registry/src/index.js";
 import { describe, expect, it } from "vitest";
 
 import {
   buildRendererInput,
+  buildStatusRendererInput,
   evaluateSeverity,
   formatCoverageMarker,
   formatDisplayValue,
@@ -64,20 +72,58 @@ function registryCapability(providerId: ProviderId): RegistryCapabilityFixture {
 function snapshotFor(
   fixture: RegistryCapabilityFixture,
   input: { readonly value: number; readonly fetchedAtEpochMs?: number } = { value: 0 },
-): NormalizedSnapshot {
-  return {
-    familyId: fixture.capability.actionFamilyId,
-    providerId: fixture.providerId,
-    metricKind: fixture.capability.metricKind,
-    metricDirection: fixture.capability.metricDirection,
-    unit: fixture.capability.displayUnit,
-    coverage: coverageFor(fixture.capability),
-    value: input.value,
-    fetchedAtEpochMs: input.fetchedAtEpochMs ?? 1_000,
-  } as NormalizedSnapshot;
+): MetricSnapshot {
+  const fetchedAtEpochMs = input.fetchedAtEpochMs ?? 1_000;
+  if (fixture.capability.actionFamilyId === "usage") {
+    if (
+      !isUsageProviderId(fixture.providerId) ||
+      fixture.capability.metricKind !== "usage-percent" ||
+      fixture.capability.metricDirection !== "upper-bound" ||
+      fixture.capability.displayUnit !== "percent"
+    ) {
+      throw new Error(`Expected a Usage percentage capability for ${fixture.providerId}`);
+    }
+    const coverage = coverageFor(fixture.capability);
+    if (coverage.kind !== "rolling-window") {
+      throw new Error(`Expected rolling-window Usage coverage for ${fixture.providerId}`);
+    }
+    const snapshot: UsagePercentSnapshot = {
+      familyId: "usage",
+      providerId: fixture.providerId,
+      metricKind: "usage-percent",
+      metricDirection: "upper-bound",
+      unit: "percent",
+      coverage,
+      value: input.value,
+      fetchedAtEpochMs,
+    };
+    return snapshot;
+  }
+  if (fixture.capability.actionFamilyId === "balance" && isBalanceProviderId(fixture.providerId)) {
+    const snapshot: BalanceSnapshot = {
+      familyId: "balance",
+      providerId: fixture.providerId,
+      metricKind: fixture.capability.metricKind,
+      metricDirection: fixture.capability.metricDirection,
+      unit: fixture.capability.displayUnit,
+      coverage: coverageFor(fixture.capability),
+      value: input.value,
+      fetchedAtEpochMs,
+    };
+    return snapshot;
+  }
+  throw new Error(`Expected a metric capability for ${fixture.providerId}`);
 }
 
-function coverageFor(capability: ProviderCapabilityMetadata): NormalizedSnapshot["coverage"] {
+function isUsageProviderId(providerId: ProviderId): providerId is UsageProviderId {
+  return USAGE_PROVIDER_IDS.some((candidate) => candidate === providerId);
+}
+
+function isBalanceProviderId(providerId: ProviderId): providerId is BalanceProviderId {
+  return BALANCE_PROVIDER_IDS.some((candidate) => candidate === providerId);
+}
+
+function coverageFor(capability: ProviderCapabilityMetadata): MetricSnapshot["coverage"] {
   if (capability.coverageKind === "rolling-window") {
     return { kind: "rolling-window", window: capability.supportedWindows?.[0] ?? "five-hour" };
   }
@@ -125,6 +171,119 @@ describe("@ai-workbench/display public surface", () => {
     expect(typeof formatDisplayValue).toBe("function");
     expect(typeof formatCoverageMarker).toBe("function");
     expect(typeof buildRendererInput).toBe("function");
+  });
+});
+
+describe("Status renderer input", () => {
+  it("builds a positive impact-none snapshot as informational without metric severity", () => {
+    const snapshot: StatusSnapshot = {
+      familyId: "status",
+      providerId: "openai-api",
+      activeIncidentCount: 2,
+      highestImpact: "none",
+      providerStatusIndicator: "none",
+      fetchedAtEpochMs: 1_000,
+    };
+
+    expect(
+      buildStatusRendererInput({
+        schedulerOutput: {
+          schedulerKey: "status|openai-api||none|",
+          displayState: "fresh",
+          refreshIntervalSeconds: 600,
+          activeRefCount: 1,
+          inFlight: false,
+          snapshot,
+        },
+        statusDisplayInput: {
+          actionFamilyId: "status",
+          providerId: "openai-api",
+          activeIncidentCount: 2,
+          highestImpact: "none",
+          providerStatusIndicator: "none",
+          tone: "informational",
+          valueText: "2",
+          fetchedAtEpochMs: 1_000,
+        },
+        headerLabel: "OpenAI",
+      }),
+    ).toEqual({
+      actionFamilyId: "status",
+      providerId: "openai-api",
+      activeIncidentCount: 2,
+      highestImpact: "none",
+      statusDisplayTone: "informational",
+      valueText: "2",
+      displayState: "fresh",
+      stale: false,
+      freshness: "fresh",
+      fetchedAtEpochMs: 1_000,
+      headerLabel: "OpenAI",
+    });
+    expect(
+      buildStatusRendererInput({
+        schedulerOutput: {
+          schedulerKey: "status|openai-api||none|",
+          displayState: "fresh",
+          refreshIntervalSeconds: 600,
+          activeRefCount: 1,
+          inFlight: false,
+          snapshot,
+        },
+        statusDisplayInput: {
+          actionFamilyId: "status",
+          providerId: "openai-api",
+          activeIncidentCount: 2,
+          highestImpact: "none",
+          providerStatusIndicator: "none",
+          tone: "informational",
+          valueText: "2",
+          fetchedAtEpochMs: 1_000,
+        },
+      }),
+    ).not.toHaveProperty("providerStatusIndicator");
+  });
+
+  it.each([
+    ["maintenance", "informational"],
+    ["minor", "warning"],
+    ["major", "critical"],
+    ["critical", "critical"],
+  ] as const)("passes aggregate-only %s through as final %s tone without exposing indicator text", (indicator, tone) => {
+    const snapshot: StatusSnapshot = {
+      familyId: "status",
+      providerId: "openai-api",
+      activeIncidentCount: 0,
+      providerStatusIndicator: indicator,
+      fetchedAtEpochMs: 2_000,
+    };
+    const result = buildStatusRendererInput({
+      schedulerOutput: {
+        schedulerKey: "status|openai-api||none|",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot,
+      },
+      statusDisplayInput: {
+        actionFamilyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 0,
+        providerStatusIndicator: indicator,
+        tone,
+        valueText: "0",
+        fetchedAtEpochMs: 2_000,
+      },
+    });
+
+    expect(result).toMatchObject({
+      actionFamilyId: "status",
+      activeIncidentCount: 0,
+      statusDisplayTone: tone,
+      valueText: "0",
+    });
+    expect(result).not.toHaveProperty("providerStatusIndicator");
   });
 });
 
@@ -756,7 +915,7 @@ describe("display boundary guards", () => {
 });
 
 describe("Codex credits category display", () => {
-  const creditsSnapshot = (value: number): NormalizedSnapshot => ({
+  const creditsSnapshot = (value: number): MetricSnapshot => ({
     familyId: "usage",
     providerId: "codex",
     metricKind: "usage-credits",
@@ -848,7 +1007,7 @@ describe("Codex credits category display", () => {
 });
 
 describe("Codex resets category display", () => {
-  const resetsSnapshot = (value: number, resetsAtEpochMs?: number): NormalizedSnapshot => ({
+  const resetsSnapshot = (value: number, resetsAtEpochMs?: number): MetricSnapshot => ({
     familyId: "usage",
     providerId: "codex",
     metricKind: "usage-resets",
@@ -863,12 +1022,12 @@ describe("Codex resets category display", () => {
   const MS_PER_DAY = 86_400_000;
   // A resets snapshot whose earliest-expiry sits exactly `days` of runway ahead of the fetch instant,
   // so the derived days-to-expiry severity basis equals `days` (integer ms keeps the edges exact).
-  const resetsSnapshotInDays = (count: number, days: number): NormalizedSnapshot =>
+  const resetsSnapshotInDays = (count: number, days: number): MetricSnapshot =>
     resetsSnapshot(count, 1_000 + Math.round(days * MS_PER_DAY));
   // The Codex resets registry default: lower-bound on the days runway, warn 7 / crit 3 (owned by
   // DEFAULT_SEVERITY_THRESHOLDS). Applied unless a user PI floor (in days) overrides it.
   const RESETS_DEFAULT_STRATEGY = { kind: "registry-default", reference: "lower-bound-resets-days-default" } as const;
-  const renderResets = (snapshot: NormalizedSnapshot, thresholds?: SeverityThresholdSet) =>
+  const renderResets = (snapshot: MetricSnapshot, thresholds?: SeverityThresholdSet) =>
     buildRendererInput({
       schedulerOutput: {
         schedulerKey: "usage:codex:resets",
@@ -970,7 +1129,7 @@ describe("Claude Code credit-spend category display", () => {
     usedMinor: number,
     capMinor: number,
     options?: { readonly currency?: string; readonly exponent?: number; readonly autoReloadOn?: boolean },
-  ): NormalizedSnapshot => {
+  ): MetricSnapshot => {
     const exponent = options?.exponent ?? 2;
     return {
       familyId: "usage",
@@ -991,7 +1150,7 @@ describe("Claude Code credit-spend category display", () => {
     };
   };
 
-  const spendStatus = (spendState: "off" | "out-of-credits", autoReloadOn = false): NormalizedSnapshot => ({
+  const spendStatus = (spendState: "off" | "out-of-credits", autoReloadOn = false): MetricSnapshot => ({
     familyId: "usage",
     providerId: "claude-code",
     metricKind: "usage-spend",
@@ -1005,7 +1164,7 @@ describe("Claude Code credit-spend category display", () => {
   });
 
   const SPEND_STRATEGY = { kind: "requires-user-profile", reason: "absolute-threshold-requires-owner-profile" } as const;
-  const renderSpend = (snapshot: NormalizedSnapshot, thresholds?: SeverityThresholdSet) =>
+  const renderSpend = (snapshot: MetricSnapshot, thresholds?: SeverityThresholdSet) =>
     buildRendererInput({
       schedulerOutput: {
         schedulerKey: "usage:claude-code:credit-spend",
@@ -1079,7 +1238,7 @@ describe("Claude Code credit-spend category display", () => {
 });
 
 describe("Kimi Code Extra Usage display", () => {
-  const kimiSpend = (usedMinor: number): NormalizedSnapshot => ({
+  const kimiSpend = (usedMinor: number): MetricSnapshot => ({
     familyId: "usage",
     providerId: "kimi-code",
     metricKind: "usage-spend",

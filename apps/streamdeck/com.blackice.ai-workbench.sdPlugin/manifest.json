@@ -35,13 +35,31 @@
       "SupportedInMultiActions": false,
       "Tooltip": "Shows an AI API vendor's remaining balance or current-period spend, with optional amber/red thresholds.",
       "UUID": "com.blackice.ai-workbench.balance-display"
+    },
+    {
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Icon": "assets/status",
+      "Name": "Status",
+      "PropertyInspectorPath": "ui/status-display.html",
+      "States": [
+        {
+          "Image": "assets/status-key",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Shows active incident count from public no-credential feeds for Anthropic, OpenAI, Moonshot AI, and MiniMax. OpenAI color reflects the worse of highest active incident impact and aggregate provider status; other providers use incident impact only.",
+      "UUID": "com.blackice.ai-workbench.status-display"
     }
   ],
   "Author": "Black Ice",
   "Category": "AI Workbench",
   "CategoryIcon": "assets/category-icon",
   "CodePath": "bin/plugin.js",
-  "Description": "Live AI-tooling usage and account balances on your Stream Deck keys — plan usage for Claude Code, Codex, Kimi Code, z.ai, and MiniMax, plus remaining balance or spend for a range of AI API vendors.",
+  "Description": "Live AI-tooling usage, account balances, and public provider active-incident counts on Stream Deck keys. Status color uses incident impact; OpenAI also uses aggregate provider status. Provider-wide only, with no component, model, or customer-specific health claim.",
   "Icon": "assets/plugin-icon",
   "Name": "AI Workbench",
   "Nodejs": {
@@ -59,5 +77,5 @@
   },
   "URL": "https://github.com/cipradu/stream-deck-ai-workbench",
   "UUID": "com.blackice.ai-workbench",
-  "Version": "0.2.0.7"
+  "Version": "0.2.0.12"
 }

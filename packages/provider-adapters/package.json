@@ -11,6 +11,7 @@
     }
   },
   "dependencies": {
+    "@ai-workbench/action-status": "workspace:*",
     "@ai-workbench/contracts": "workspace:*",
     "@ai-workbench/errors": "workspace:*",
     "@ai-workbench/http": "workspace:*",

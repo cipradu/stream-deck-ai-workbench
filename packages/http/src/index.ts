@@ -1,4 +1,4 @@
-import { Clock, Duration, Effect, Layer, Option, Schema } from "effect";
+import { Cause, Clock, Duration, Effect, Layer, Option, Schema, Stream } from "effect";
 import {
   FetchHttpClient,
   Headers as PlatformHeaders,
@@ -31,6 +31,7 @@ export const packageName = "@ai-workbench/http" as const;
 
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 export const MAX_RETRY_AFTER_SECONDS = 30 * 60;
+export const MAX_BOUNDED_JSON_RESPONSE_BYTES = 65_536;
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -143,7 +144,11 @@ export interface RequestTextBodyOptions {
  */
 export interface RequestJsonSchemaOptions extends RequestTextBodyOptions {
   readonly responseClassifier?: JsonResponseClassifier;
+  readonly responseBodyMode?: "bounded";
+  readonly statusClassificationMode?: HttpStatusClassificationMode;
 }
+
+export type HttpStatusClassificationMode = "credentialed" | "credential-free";
 
 /**
  * The whole Effect-native pipeline in one call: build → execute-once → central one-read
@@ -152,8 +157,13 @@ export interface RequestJsonSchemaOptions extends RequestTextBodyOptions {
  * (decode inside the deadline). A standalone
  * caller with no outer deadline is therefore protected from a stalled response body:
  * `request.timeoutMs`/`request.signal` bound the body read, not merely the execute/header
- * phase. Yields the typed decoded value or fails with a tagged error from the shared
- * taxonomy. Reuses the shared `executeAndClassify` + `decodeJsonBody` +
+ * phase. `responseBodyMode: "bounded"` opts into the 65,536-byte streamed reader;
+ * absence retains the accepted `response.text` reader.
+ * `statusClassificationMode: "credential-free"` opts public requests out of
+ * credential-specific 401/403 mapping;
+ * absence and `"credentialed"` retain the accepted mapping. Yields the typed decoded
+ * value or fails with a tagged error from the shared taxonomy. Reuses the shared
+ * `executeAndClassify` + JSON decode +
  * `withTransportTimeoutAbort` core — no duplicated status/Retry-After/timeout/transport
  * logic. `HttpClient` is left in the context channel for the adapter to satisfy with
  * `fetchHttpClientLayer` at the runtime root. One attempt, NO retry.
@@ -164,8 +174,12 @@ export function requestJsonSchema<A, I, R>(
   options: RequestJsonSchemaOptions = {},
 ): Effect.Effect<A, SanitizedTaggedError, PlatformHttpClient.HttpClient | R> {
   const timeoutMs = normalizeTimeout(request.timeoutMs ?? options.defaultTimeoutMs);
-  const withBody = executeAndClassify(buildRequest(request)).pipe(
-    Effect.flatMap((response) => decodeJsonBody(response, schema, options.responseClassifier)),
+  const withBody = executeAndClassify(buildRequest(request), options.statusClassificationMode).pipe(
+    Effect.flatMap((response) =>
+      options.responseBodyMode === "bounded"
+        ? decodeBoundedJsonBody(response, schema, options.responseClassifier)
+        : decodeJsonBody(response, schema, options.responseClassifier),
+    ),
   );
   return withTransportTimeoutAbort(withBody, timeoutMs, request.signal);
 }
@@ -218,6 +232,7 @@ export function requestTextBody(
  */
 function executeAndClassify(
   request: HttpClientRequest.HttpClientRequest,
+  statusClassificationMode: HttpStatusClassificationMode = "credentialed",
 ): Effect.Effect<
   HttpClientResponse.HttpClientResponse,
   HttpClientError.HttpClientError | SanitizedTaggedError,
@@ -227,7 +242,7 @@ function executeAndClassify(
     const client = yield* PlatformHttpClient.HttpClient;
     const response = yield* client.execute(request);
     if (!isSuccessStatus(response.status)) {
-      const tagged = yield* statusTaggedError(response);
+      const tagged = yield* statusTaggedError(response, statusClassificationMode);
       return yield* Effect.fail(tagged);
     }
     return response;
@@ -267,6 +282,72 @@ function buildRequest(request: HttpJsonRequest): HttpClientRequest.HttpClientReq
 
 function decodeText(response: HttpClientResponse.HttpClientResponse): Effect.Effect<string, ValidationDrift> {
   return response.text.pipe(Effect.mapError(() => bodyValidationDrift("http-response-text", "response-text-invalid")));
+}
+
+interface BoundedJsonBodyState {
+  readonly chunks: readonly Uint8Array[];
+  readonly retainedBytes: number;
+}
+
+function decodeBoundedJsonBody<A, I, R>(
+  response: HttpClientResponse.HttpClientResponse,
+  schema: Schema.Schema<A, I, R>,
+  responseClassifier: JsonResponseClassifier | undefined,
+): Effect.Effect<A, ValidationDrift, R> {
+  const bodyState = response.stream.pipe(
+    Stream.runFoldEffect<BoundedJsonBodyState, Uint8Array, ValidationDrift, never>(
+      { chunks: [], retainedBytes: 0 },
+      (state, chunk) => {
+        const projectedBytes = state.retainedBytes + chunk.byteLength;
+        if (projectedBytes > MAX_BOUNDED_JSON_RESPONSE_BYTES) {
+          return Effect.fail(bodyTooLargeValidationDrift());
+        }
+        return Effect.succeed({
+          chunks: [...state.chunks, chunk],
+          retainedBytes: projectedBytes,
+        });
+      },
+    ),
+    Effect.mapError((error) =>
+      error._tag === "ValidationDrift" ? error : responseValidationDrift("response-body-unreadable"),
+    ),
+    Effect.catchAllCause(preserveBodyTooLargeOverStreamFinalizerFailure),
+  );
+
+  return bodyState.pipe(
+    Effect.map(decodeBoundedBodyText),
+    Effect.flatMap((body) => decodeJsonText(body, schema, responseClassifier)),
+  );
+}
+
+// This cause handler is attached directly to the stream fold, before body assembly
+// and decode. A defect accompanying the typed cap failure can therefore only come
+// from closing that stream scope; every other cause is preserved unchanged.
+function preserveBodyTooLargeOverStreamFinalizerFailure(
+  cause: Cause.Cause<ValidationDrift>,
+): Effect.Effect<never, ValidationDrift> {
+  const failure = Option.getOrUndefined(Cause.failureOption(cause));
+  if (failure?.reasonCode === "response-body-too-large") {
+    return Effect.fail(failure);
+  }
+  return Effect.failCause(cause);
+}
+
+function bodyTooLargeValidationDrift(): ValidationDrift {
+  return new ValidationDrift({
+    reasonCode: "response-body-too-large",
+    providerFailureClass: "validation",
+  });
+}
+
+function decodeBoundedBodyText(state: BoundedJsonBodyState): string {
+  const body = new Uint8Array(state.retainedBytes);
+  let offset = 0;
+  for (const chunk of state.chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
 }
 
 function decodeJsonText<A, I, R>(
@@ -403,6 +484,7 @@ function transportNetworkFailure(reasonCode: string): NetworkFailure {
  */
 function statusTaggedError(
   response: HttpClientResponse.HttpClientResponse,
+  statusClassificationMode: HttpStatusClassificationMode,
 ): Effect.Effect<SanitizedTaggedError> {
   const status = response.status;
   if (status === 429) {
@@ -418,15 +500,21 @@ function statusTaggedError(
       }),
     );
   }
-  return Effect.succeed(nonRateLimitStatusError(status));
+  return Effect.succeed(nonRateLimitStatusError(status, statusClassificationMode));
 }
 
-function nonRateLimitStatusError(status: number): SanitizedTaggedError {
+function nonRateLimitStatusError(
+  status: number,
+  statusClassificationMode: HttpStatusClassificationMode,
+): SanitizedTaggedError {
   const shared = {
     reasonCode: "provider-http-status",
     providerFailureClass: "http-status" as const,
     httpStatus: status,
   };
+  if (statusClassificationMode === "credential-free" && (status === 401 || status === 403)) {
+    return new HttpStatusFailure({ ...shared, statusClass: httpStatusClassOf(status) });
+  }
   if (status === 401) {
     return new UnauthorizedExpired(shared);
   }

@@ -1,17 +1,29 @@
 import type { UsageWindowId } from "@ai-workbench/contracts";
-import { IMPLEMENTATION_STATUS_BEHAVIOR, type ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
+import {
+  IMPLEMENTATION_STATUS_BEHAVIOR,
+  type ProviderCapabilityMetadata,
+  type StatusProviderCapabilityMetadata,
+} from "@ai-workbench/provider-registry";
 import type { SchedulerFetch } from "@ai-workbench/scheduler";
 import { Effect } from "effect";
 
 import type { AdapterFetchFailure, EffectSchedulerFetch } from "./effect-fetch.js";
 import { gatedFailure, noSourceConfigured, unsupportedFetchFailure } from "./provider-failures.js";
-import type { CreateSourceGatedBalanceFetchInput, CreateSourceGatedUsageFetchInput } from "./types.js";
+import type {
+  CreateSourceGatedBalanceFetchInput,
+  CreateSourceGatedStatusFetchInput,
+  CreateSourceGatedUsageFetchInput,
+} from "./types.js";
 
 export interface CreateSourceGatedUsageFetchEffectInput extends Omit<CreateSourceGatedUsageFetchInput, "sourceFetch"> {
   readonly sourceFetch?: EffectSchedulerFetch;
 }
 
 export interface CreateSourceGatedBalanceFetchEffectInput extends Omit<CreateSourceGatedBalanceFetchInput, "sourceFetch"> {
+  readonly sourceFetch?: EffectSchedulerFetch;
+}
+
+export interface CreateSourceGatedStatusFetchEffectInput extends Omit<CreateSourceGatedStatusFetchInput, "sourceFetch"> {
   readonly sourceFetch?: EffectSchedulerFetch;
 }
 
@@ -57,6 +69,23 @@ export function createSourceGatedBalanceFetch(input: CreateSourceGatedBalanceFet
   };
 }
 
+export function createSourceGatedStatusFetch(input: CreateSourceGatedStatusFetchInput): SchedulerFetch {
+  return (request) => {
+    if (!isSupportedStatusSource(input.capability, input.providerId, request)) {
+      return unsupportedFetchFailure("unsupported-status-source");
+    }
+
+    if (!IMPLEMENTATION_STATUS_BEHAVIOR[input.capability.implementationStatus].fetchAllowed) {
+      return {
+        ok: false,
+        failure: gatedFailure(input.capability),
+      };
+    }
+
+    return input.sourceFetch?.(request) ?? noSourceConfigured("status-source-not-configured");
+  };
+}
+
 /**
  * Effect-native source gate: the same registry status/coverage gating as the Promise
  * variant, but returning an `Effect` the scheduler fibers consume DIRECTLY (no `runPromise` bridge).
@@ -99,6 +128,20 @@ export function createSourceGatedBalanceFetchEffect(input: CreateSourceGatedBala
   };
 }
 
+export function createSourceGatedStatusFetchEffect(input: CreateSourceGatedStatusFetchEffectInput): EffectSchedulerFetch {
+  return (request) => {
+    if (!isSupportedStatusSource(input.capability, input.providerId, request)) {
+      return Effect.fail<AdapterFetchFailure>({ failure: unsupportedFetchFailure("unsupported-status-source").failure });
+    }
+
+    if (!IMPLEMENTATION_STATUS_BEHAVIOR[input.capability.implementationStatus].fetchAllowed) {
+      return Effect.fail<AdapterFetchFailure>({ failure: gatedFailure(input.capability) });
+    }
+
+    return input.sourceFetch?.(request) ?? Effect.fail<AdapterFetchFailure>({ failure: noSourceConfigured("status-source-not-configured").failure });
+  };
+}
+
 function isSupportedUsageWindow(
   capability: ProviderCapabilityMetadata,
   windowOrPeriod: string | undefined,
@@ -112,4 +155,17 @@ function isSupportedBalanceCoverage(capability: ProviderCapabilityMetadata, wind
   }
 
   return windowOrPeriod === undefined || windowOrPeriod === capability.coverageKind;
+}
+
+function isSupportedStatusSource(
+  capability: StatusProviderCapabilityMetadata,
+  providerId: string,
+  request: Parameters<SchedulerFetch>[0],
+): boolean {
+  return (
+    capability.actionFamilyId === "status" &&
+    request.keyParts.familyId === "status" &&
+    request.keyParts.providerId === providerId &&
+    request.keyParts.windowOrPeriod === undefined
+  );
 }

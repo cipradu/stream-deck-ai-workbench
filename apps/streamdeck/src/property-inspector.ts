@@ -1,4 +1,5 @@
 import { listBalanceProviderOptions, type BalanceProviderOption } from "@ai-workbench/action-balance";
+import { listStatusProviderOptions, type StatusProviderOption } from "@ai-workbench/action-status";
 import { listUsageProviderOptions, type UsageProviderOption } from "@ai-workbench/action-usage";
 import type { ActionFamilyId, CredentialClass } from "@ai-workbench/contracts";
 
@@ -25,6 +26,16 @@ export type PropertyInspectorProviderOption =
       readonly selectionEligible: boolean;
     }
   | {
+      readonly providerId: StatusProviderOption["providerId"];
+      readonly productLabel: string;
+      readonly actionFamilyId: "status";
+      readonly credentialClass?: never;
+      readonly credentialLabel?: never;
+      readonly credentialPlaceholder?: never;
+      readonly presentation?: never;
+      readonly selectionEligible: boolean;
+    }
+  | {
       readonly providerId: BalanceProviderOption["providerId"];
       readonly productLabel: string;
       readonly actionFamilyId: "balance";
@@ -47,14 +58,32 @@ export interface PropertyInspectorPresentation {
 }
 
 export function listProviderOptionsForFamily(familyId: ActionFamilyId): readonly PropertyInspectorProviderOption[] {
-  return familyId === "usage"
-    ? listUsageProviderOptions().map(toPropertyInspectorProviderOption)
-    : listBalanceProviderOptions().map(toPropertyInspectorProviderOption);
+  if (familyId === "status") {
+    return listStatusProviderOptions().map(toPropertyInspectorProviderOption);
+  }
+  if (familyId === "usage") {
+    return listUsageProviderOptions().map(toPropertyInspectorProviderOption);
+  }
+  if (familyId === "balance") {
+    return listBalanceProviderOptions().map(toPropertyInspectorProviderOption);
+  }
+  return [];
 }
 
 function toPropertyInspectorProviderOption(option: UsageProviderOption): PropertyInspectorProviderOption;
 function toPropertyInspectorProviderOption(option: BalanceProviderOption): PropertyInspectorProviderOption;
-function toPropertyInspectorProviderOption(option: UsageProviderOption | BalanceProviderOption): PropertyInspectorProviderOption {
+function toPropertyInspectorProviderOption(option: StatusProviderOption): PropertyInspectorProviderOption;
+function toPropertyInspectorProviderOption(
+  option: UsageProviderOption | BalanceProviderOption | StatusProviderOption,
+): PropertyInspectorProviderOption {
+  if (option.actionFamilyId === "status") {
+    return {
+      providerId: option.providerId,
+      productLabel: option.pickerLabel,
+      actionFamilyId: option.actionFamilyId,
+      selectionEligible: option.selectionEligible,
+    };
+  }
   const credential = credentialPresentationForOption(option);
   const presentation = presentationForOption(option.presentation);
 

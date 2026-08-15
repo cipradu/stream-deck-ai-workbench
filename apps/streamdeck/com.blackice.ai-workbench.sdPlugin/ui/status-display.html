@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- Generated file. Edit scripts/generate-status-property-inspector.ts and the Status provider registry instead. -->
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>Status Settings</title>
+	<script src="sdpi-components.js"></script>
+</head>
+<body>
+	<sdpi-item label="Provider">
+		<sdpi-select setting="providerId" placeholder="Anthropic (default)">
+			<option value="anthropic-api">Anthropic</option>
+			<option value="openai-api">OpenAI</option>
+			<option value="moonshot">Moonshot AI</option>
+			<option value="minimax">MiniMax</option>
+		</sdpi-select>
+	</sdpi-item>
+
+	<sdpi-item label="Refresh (s)">
+		<sdpi-textfield setting="intervalSeconds" type="number" placeholder="600 (min 60)"></sdpi-textfield>
+	</sdpi-item>
+</body>
+</html>

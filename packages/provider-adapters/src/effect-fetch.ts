@@ -69,6 +69,9 @@ export type EffectBalanceSchedulerFetch = EffectBalanceProviderSourceFetch;
 /** @internal Adapter-module source type retained at its established import seam. */
 export type EffectUsageSchedulerFetch = EffectUsageProviderSourceFetch;
 
+/** @internal Status-module source type retained at its family import seam. */
+export type EffectStatusSchedulerFetch = EffectProviderSourceFetch;
+
 /** Converts a safe governor block at the adapter/source dispatch boundary. */
 export function schedulerFailureFromGovernorBlocked(blocked: GovernorBlocked): AdapterFetchFailure {
   return {

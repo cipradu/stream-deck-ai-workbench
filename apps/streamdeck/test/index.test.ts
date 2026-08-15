@@ -6,15 +6,21 @@ import { fileURLToPath } from "node:url";
 import { Duration, Effect, ManagedRuntime, Redacted, TestClock, TestContext } from "effect";
 
 import { listBalanceProviderOptions } from "@ai-workbench/action-balance";
+import { listStatusProviderOptions } from "@ai-workbench/action-status";
 import { listUsageProviderOptions } from "@ai-workbench/action-usage";
 import {
   PROVIDER_IDS,
   serializeSchedulerKey,
   type MetricDirection,
-  type NormalizedSnapshot,
+  type MetricSnapshot,
   type SchedulerKeyParts,
 } from "@ai-workbench/contracts";
-import { evaluateSeverity, type DisplayRendererInput } from "@ai-workbench/display";
+import {
+  buildStatusRendererInput,
+  evaluateSeverity,
+  type DisplayRendererInput,
+  type MetricDisplayRendererInput,
+} from "@ai-workbench/display";
 import { createSanitizedFailure } from "@ai-workbench/errors";
 import type { SanitizedLogEvent, StreamDeckLogSink } from "@ai-workbench/logging";
 import type {
@@ -25,16 +31,22 @@ import type {
   SchedulerOutput,
   SchedulerSettingsChangeInput,
 } from "@ai-workbench/scheduler";
-import { parseActionSettings, parsePropertyInspectorPayload } from "@ai-workbench/settings";
+import {
+  classifyActionSettingsChange,
+  parseActionSettings,
+  parsePropertyInspectorPayload,
+  type NormalizedActionSettingsView,
+} from "@ai-workbench/settings";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { BALANCE_ACTION_UUID, PLUGIN_UUID, USAGE_ACTION_UUID, packageName } from "../src/constants.js";
+import { BALANCE_ACTION_UUID, PLUGIN_UUID, STATUS_ACTION_UUID, USAGE_ACTION_UUID, packageName } from "../src/constants.js";
 import { resolveCredentialMaterialFromGlobalSettings } from "../src/credentials.js";
 import { createSdkLogSink, writeShellLog } from "../src/logging.js";
 import { listProviderOptionsForFamily } from "../src/property-inspector.js";
 import { prepareLogoSvg } from "../src/logo-loader.js";
 import { renderDisplayInput } from "../src/renderer.js";
 import { createAppManagedRuntime, createRuntimeServices } from "../src/runtime.js";
+import { WORKBENCH_ACTION_DEFINITIONS } from "../src/index.js";
 import { createSchedulerFetchForActionSettings, withFetchPathLogging } from "../src/scheduler-fetch.js";
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
 import {
@@ -314,7 +326,7 @@ function createShell(input: {
   };
 }
 
-function balanceSnapshot(keyParts: SchedulerKeyParts): NormalizedSnapshot {
+function balanceSnapshot(keyParts: SchedulerKeyParts): MetricSnapshot {
   return {
     coverage: { kind: "evergreen" },
     familyId: "balance",
@@ -354,6 +366,48 @@ function rateLimitedFailure() {
 }
 
 describe("scheduler fetch-path logging", () => {
+  it("rejects an invalid Status provider before Usage or Balance adapter routing is attempted", async () => {
+    const settings = {
+      familyId: "status",
+      providerId: "fal",
+      refreshIntervalSeconds: 600,
+      displayPreferences: {},
+      schedulerKeyParts: {
+        familyId: "status",
+        providerId: "fal",
+        credentialProfileId: "none",
+      },
+      schedulerKey: "status|fal||none|",
+    } satisfies NormalizedActionSettingsView;
+    const runFetch = createSchedulerFetchForActionSettings(settings, {
+      now: () => 100,
+      readGlobalSettings: async () => ({}),
+      sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
+    });
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        runFetch({
+          key: settings.schedulerKey,
+          keyParts: settings.schedulerKeyParts,
+          schedulerKey: settings.schedulerKey,
+          signal: new AbortController().signal,
+          startedAtEpochMs: 100,
+          trigger: "healthy-poll",
+        }),
+      ),
+    );
+
+    expect(outcome).toMatchObject({
+      _tag: "Left",
+      left: {
+        failure: {
+          diagnostics: { reasonCode: "status-action-settings-invalid" },
+        },
+      },
+    });
+  });
+
   it("emits one existing failed event with only catalog-normalized Claude response diagnostic labels", async () => {
     const parsed = parseActionSettings(usageSettings);
     if (!parsed.ok) {
@@ -553,7 +607,7 @@ describe("scheduler fetch-path logging", () => {
         sourceFlightRuntime: testProviderRequestRuntime.sourceFlightRuntime,
       },
       () =>
-        Effect.succeed<NormalizedSnapshot>({
+        Effect.succeed<MetricSnapshot>({
           coverage: { kind: "rolling-window", window: "five-hour" },
           familyId: "usage",
           fetchedAtEpochMs: 100,
@@ -699,14 +753,20 @@ describe("@ai-workbench/streamdeck package and manifest", () => {
     expect(packageName).toBe("@ai-workbench/streamdeck");
   });
 
-  it("uses the approved Stream Deck manifest baseline and prefixed action UUIDs", async () => {
+  it("keeps exactly three manifest and runtime actions in UUID parity", async () => {
     const manifest = JSON.parse(await readFile(manifestPath(), "utf8")) as {
       readonly SDKVersion: number;
       readonly Nodejs: { readonly Version: string };
       readonly Software: { readonly MinimumVersion: string };
       readonly CodePath: string;
       readonly UUID: string;
-      readonly Actions: readonly { readonly UUID: string; readonly PropertyInspectorPath: string }[];
+      readonly Actions: readonly {
+        readonly UUID: string;
+        readonly Icon: string;
+        readonly Name: string;
+        readonly PropertyInspectorPath: string;
+        readonly States: readonly { readonly Image: string }[];
+      }[];
     };
 
     expect(manifest).toMatchObject({
@@ -716,7 +776,18 @@ describe("@ai-workbench/streamdeck package and manifest", () => {
       Software: { MinimumVersion: "7.1" },
       UUID: PLUGIN_UUID,
     });
-    expect(manifest.Actions.map((action) => action.UUID)).toEqual([USAGE_ACTION_UUID, BALANCE_ACTION_UUID]);
+    const expectedActionUuids = [USAGE_ACTION_UUID, BALANCE_ACTION_UUID, STATUS_ACTION_UUID];
+    expect(manifest.Actions).toHaveLength(3);
+    expect(manifest.Actions.map((action) => action.UUID)).toEqual(expectedActionUuids);
+    expect(WORKBENCH_ACTION_DEFINITIONS.map((definition) => definition.manifestId)).toEqual(expectedActionUuids);
+    expect(WORKBENCH_ACTION_DEFINITIONS.map((definition) => definition.familyId)).toEqual(["usage", "balance", "status"]);
+    expect(manifest.Actions[2]).toMatchObject({
+      Icon: "assets/status",
+      Name: "Status",
+      PropertyInspectorPath: "ui/status-display.html",
+      States: [{ Image: "assets/status-key" }],
+      UUID: STATUS_ACTION_UUID,
+    });
     for (const action of manifest.Actions) {
       expect(action.UUID.startsWith(`${PLUGIN_UUID}.`)).toBe(true);
       expect(action.PropertyInspectorPath.endsWith(".html")).toBe(true);
@@ -735,12 +806,19 @@ describe("Property Inspector registry data and static UI", () => {
   it("maps action provider options into PI-safe labels without internal proof metadata", () => {
     const usageOptions = listProviderOptionsForFamily("usage");
     const balanceOptions = listProviderOptionsForFamily("balance");
+    const statusOptions = listProviderOptionsForFamily("status");
 
     expect(usageOptions.map((option) => option.providerId)).toEqual(
       listUsageProviderOptions().map((option) => option.providerId),
     );
     expect(balanceOptions.map((option) => option.providerId)).toEqual(
       listBalanceProviderOptions().map((option) => option.providerId),
+    );
+    expect(statusOptions.map((option) => option.providerId)).toEqual(
+      listStatusProviderOptions().map((option) => option.providerId),
+    );
+    expect(statusOptions.map((option) => option.productLabel)).toEqual(
+      listStatusProviderOptions().map((option) => option.pickerLabel),
     );
 
     const claudeCode = usageOptions.find((option) => option.providerId === "claude-code");
@@ -770,14 +848,59 @@ describe("Property Inspector registry data and static UI", () => {
       credentialClass: "plugin-api-key",
     });
 
-    const serializedOptions = JSON.stringify([...usageOptions, ...balanceOptions]);
+    const serializedOptions = JSON.stringify([...usageOptions, ...balanceOptions, ...statusOptions]);
     for (const phrase of internalProofPhrases) {
       expect(serializedOptions).not.toContain(phrase);
     }
-    for (const option of [...usageOptions, ...balanceOptions]) {
+    for (const option of [...usageOptions, ...balanceOptions, ...statusOptions]) {
       expect(option).not.toHaveProperty("unavailableReason");
       expect(option).not.toHaveProperty("openDecision");
     }
+  });
+
+  it("generates the exact selectable Status provider list into one settings-bound control", async () => {
+    const statusHtml = await readFile(propertyInspectorPath("status-display.html"), "utf8");
+    const registryOptions = listStatusProviderOptions();
+    const bodyMatch = statusHtml.match(/<body(?:\s[^>]*)?>([\s\S]*?)<\/body>/i);
+    expect(bodyMatch).not.toBeNull();
+    const bodyHtml = bodyMatch?.[1] ?? "";
+    const firstUserFacingElement = bodyHtml
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<script(?:\s[^>]*)?>[\s\S]*?<\/script>/gi, "")
+      .trimStart()
+      .match(/^<([a-z][\w-]*)([^>]*)>/i);
+    const providerItems = [...bodyHtml.matchAll(/<sdpi-item\b[^>]*\blabel="Provider"[^>]*>/gi)];
+    const providerItemMatch = bodyHtml.match(
+      /<sdpi-item\b[^>]*\blabel="Provider"[^>]*>([\s\S]*?)<\/sdpi-item>/i,
+    );
+    const providerSelects = [...(providerItemMatch?.[1] ?? "").matchAll(/<sdpi-select\b([^>]*)>/gi)];
+    const providerControls = statusHtml.match(/setting="providerId"/g) ?? [];
+    const generatedOptions = [...statusHtml.matchAll(/<option value="([^"]+)">([^<]+)<\/option>/g)].map((match) => ({
+      providerId: match[1],
+      productLabel: match[2],
+    }));
+
+    expect(bodyHtml).not.toMatch(/<(?:h[1-6]|p)(?:\s|>)/i);
+    expect(firstUserFacingElement?.[1]?.toLowerCase()).toBe("sdpi-item");
+    expect(firstUserFacingElement?.[2]).toMatch(/\blabel="Provider"/);
+    expect(providerItems).toHaveLength(1);
+    expect(providerItemMatch).not.toBeNull();
+    expect(providerSelects).toHaveLength(1);
+    expect(providerSelects[0]?.[1]).toMatch(/\bsetting="providerId"/);
+    expect(providerSelects[0]?.[1]).toMatch(/\bplaceholder="Anthropic \(default\)"/);
+    expect(providerControls).toHaveLength(1);
+    expect(generatedOptions).toEqual(
+      registryOptions.map((option) => ({ providerId: option.providerId, productLabel: option.pickerLabel })),
+    );
+    expect(generatedOptions).toEqual([
+      { providerId: "anthropic-api", productLabel: "Anthropic" },
+      { providerId: "openai-api", productLabel: "OpenAI" },
+      { providerId: "moonshot", productLabel: "Moonshot AI" },
+      { providerId: "minimax", productLabel: "MiniMax" },
+    ]);
+    expect(statusHtml).toContain('setting="intervalSeconds"');
+    expect(statusHtml).toContain('placeholder="600 (min 60)"');
+    expect(statusHtml).not.toMatch(/credential|api key/i);
   });
 
   it("mirrors the Usage panel's static provider/window lists against the registry (parity guard)", async () => {
@@ -895,6 +1018,10 @@ describe("Property Inspector registry data and static UI", () => {
     expect(balanceHtml).toContain('setting="balanceApiKeys.anthropic" global');
     expect(balanceHtml).toContain('setting="warnFloor"');
     expect(balanceHtml).toContain('setting="criticalFloor"');
+
+    const statusHtml = await readFile(propertyInspectorPath("status-display.html"), "utf8");
+    expect(statusHtml).toContain('setting="providerId"');
+    expect(statusHtml).toContain('placeholder="600 (min 60)"');
   });
 
 });
@@ -933,6 +1060,214 @@ describe("settings boundary and PI writes", () => {
         providerId: "anthropic-api",
       },
     });
+  });
+
+  it("normalizes empty Status settings to Anthropic at 600 seconds with no credential identity", () => {
+    expect(parseActionSettingsForFamily("status", {})).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "anthropic-api",
+        refreshIntervalSeconds: 600,
+        displayPreferences: {},
+        schedulerKeyParts: {
+          familyId: "status",
+          providerId: "anthropic-api",
+          credentialProfileId: "none",
+        },
+        schedulerKey: "status|anthropic-api||none|",
+      },
+    });
+    expect(defaultActionSettingsForFamily("status")).toEqual({
+      familyId: "status",
+      providerId: "anthropic-api",
+      refreshIntervalSeconds: 600,
+      displayPreferences: {},
+    });
+  });
+
+  it.each(["anthropic-api", "openai-api", "moonshot", "minimax"] as const)(
+    "normalizes approved Status provider %s through the app family seam",
+    (providerId) => {
+      expect(parseActionSettingsForFamily("status", { familyId: "status", providerId })).toMatchObject({
+        ok: true,
+        value: {
+          familyId: "status",
+          providerId,
+          refreshIntervalSeconds: 600,
+          displayPreferences: {},
+          schedulerKeyParts: {
+            familyId: "status",
+            providerId,
+            credentialProfileId: "none",
+          },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ["familyId", "null", null],
+    ["familyId", "number", 42],
+    ["familyId", "boolean", true],
+    ["familyId", "array", []],
+    ["familyId", "object", {}],
+    ["providerId", "null", null],
+    ["providerId", "number", 42],
+    ["providerId", "boolean", true],
+    ["providerId", "array", []],
+    ["providerId", "object", {}],
+  ] as const)("rejects present malformed Status %s values of type %s", (field, _valueType, value) => {
+    expect(parseActionSettingsForFamily("status", { [field]: value })).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    ["empty", {}, "anthropic-api"],
+    ["family only", { familyId: "status" }, "anthropic-api"],
+    ["provider only", { providerId: "openai-api" }, "openai-api"],
+    ["exact fields", { familyId: "status", providerId: "moonshot" }, "moonshot"],
+  ] as const)("preserves valid Status normalization for %s input", (_caseName, input, providerId) => {
+    expect(parseActionSettingsForFamily("status", input)).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId,
+        refreshIntervalSeconds: 600,
+        displayPreferences: {},
+      },
+    });
+  });
+
+  it("normalizes Status legacy intervalSeconds like Usage and Balance", () => {
+    expect(parseActionSettingsForFamily("status", { familyId: "status", providerId: "openai-api", intervalSeconds: 900 })).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "openai-api",
+        refreshIntervalSeconds: 900,
+        schedulerKey: "status|openai-api||none|",
+      },
+    });
+  });
+
+  it.each([59, 3601, 600.5, Number.NaN])("rejects Status refreshIntervalSeconds %s through the app seam", (refreshIntervalSeconds) => {
+    expect(parseActionSettingsForFamily("status", { familyId: "status", refreshIntervalSeconds })).toMatchObject({ ok: false });
+  });
+
+  it("clamps old persisted Status intervalSeconds into current bounds", () => {
+    expect(parseActionSettingsForFamily("status", { familyId: "status", intervalSeconds: 30 })).toMatchObject({
+      ok: true,
+      value: {
+        refreshIntervalSeconds: 60,
+      },
+    });
+  });
+
+  it("forwards explicit undefined Status discriminants to the central parser", () => {
+    expect(parseActionSettingsForFamily("status", { familyId: undefined })).toMatchObject({ ok: false });
+    expect(parseActionSettingsForFamily("status", { providerId: undefined })).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "anthropic-api",
+      },
+    });
+  });
+
+  it("ignores inherited Status discriminants when applying absent-field defaults", () => {
+    const input: Record<string, unknown> = {};
+    Object.setPrototypeOf(input, {
+      familyId: "balance",
+      providerId: "deepseek",
+    });
+
+    expect(parseActionSettingsForFamily("status", input)).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "status",
+        providerId: "anthropic-api",
+      },
+    });
+  });
+
+  it("rejects wrong-family, unsupported-provider, legacy-alias, refresh, credential, display, and nested Status inputs", () => {
+    const rejectedInputs = [
+      null,
+      [],
+      "status",
+      { familyId: "balance", providerId: "anthropic-api" },
+      { providerId: "deepseek" },
+      { providerId: "zai-coding-plan" },
+      { providerId: "unknown-provider" },
+      { provider: "anthropic-api" },
+      { vendor: "anthropic" },
+      { credentialProfileRef: { profileId: "none" } },
+      { displayPreferences: {} },
+      { nested: { providerId: "anthropic-api" } },
+    ];
+
+    for (const input of rejectedInputs) {
+      expect(parseActionSettingsForFamily("status", input)).toMatchObject({ ok: false });
+    }
+  });
+
+  it("changes the canonical Status scheduler key and refetch classification only when the provider changes", () => {
+    const anthropic = parseActionSettingsForFamily("status", {});
+    const sameAnthropic = parseActionSettingsForFamily("status", { familyId: "status", providerId: "anthropic-api" });
+    const openAi = parseActionSettingsForFamily("status", { providerId: "openai-api" });
+    if (!anthropic.ok || !sameAnthropic.ok || !openAi.ok) {
+      throw new Error("Expected valid Status settings fixtures");
+    }
+
+    expect(anthropic.value.schedulerKey).toBe(sameAnthropic.value.schedulerKey);
+    expect(classifyActionSettingsChange(anthropic.value, sameAnthropic.value)).toEqual({
+      kind: "unchanged",
+      schedulerKeyChanged: false,
+      providerRefetchRequired: false,
+      bypassBackoffAllowed: false,
+      refreshPolicyChanged: false,
+      displayOnly: false,
+      reasons: [],
+    });
+    expect(openAi.value.schedulerKey).not.toBe(anthropic.value.schedulerKey);
+    expect(classifyActionSettingsChange(anthropic.value, openAi.value)).toMatchObject({
+      kind: "provider-source-affecting",
+      schedulerKeyChanged: true,
+      providerRefetchRequired: true,
+      bypassBackoffAllowed: true,
+      refreshPolicyChanged: false,
+      displayOnly: false,
+      reasons: ["provider-changed"],
+    });
+  });
+
+  it("keeps credential and display global-setting changes disconnected from an active Status key", async () => {
+    const scheduler = new FakeScheduler();
+    const action = new FakeAction("action-status-global-isolation", {});
+    const { shell } = createShell({ scheduler });
+    const baseline = { credentialProfiles: [], severityProfiles: [] };
+
+    await shell.handleWillAppear("status", action, {});
+    shell.primeGlobalSettingsBaseline(baseline);
+    await shell.handleGlobalSettingsChanged({
+      credentialProfiles: [
+        {
+          actionFamilyId: "balance",
+          credentialClass: "plugin-api-key",
+          credentialMaterial: { kind: "inline-secret", value: "fixture-unrelated-global-credential" },
+          profileId: "profile-unrelated",
+          providerId: "fal",
+        },
+      ],
+      severityProfiles: [
+        {
+          profileId: "severity-unrelated",
+          thresholds: { direction: "lower-bound", basis: "absolute", warningAt: 10 },
+        },
+      ],
+    });
+
+    expect(scheduler.globalSettingsChangeCount()).toBe(0);
   });
 
   it("accepts old project action settings fields without accepting secret-shaped action payloads", () => {
@@ -1376,6 +1711,62 @@ describe("settings boundary and PI writes", () => {
     expect(falAction.images).toHaveLength(2);
     expect(deepgramAction.images).toHaveLength(2);
     expect(JSON.stringify({ globalWrites, logEvents })).not.toContain("profileId\":123");
+  });
+
+  it("fails closed for credential-dependent keys without routing malformed globals to Status", async () => {
+    const scheduler = new FakeScheduler();
+    const statusAction = new FakeAction("action-status-malformed-global", {
+      familyId: "status",
+      providerId: "anthropic-api",
+    });
+    const firstFalAction = new FakeAction("action-fal-malformed-global-first");
+    const secondFalAction = new FakeAction("action-fal-malformed-global-second");
+    const falSettings = {
+      ...balanceSettings,
+      credentialProfileRef: {
+        credentialClass: "plugin-api-key",
+        kind: "credential-profile",
+        profileId: "profile-fal-primary",
+      },
+    } as const;
+    const { shell } = createShell({ scheduler });
+
+    await shell.handleWillAppear("status", statusAction, {
+      familyId: "status",
+      providerId: "anthropic-api",
+    });
+    await shell.handleWillAppear("balance", firstFalAction, falSettings);
+    await shell.handleWillAppear("balance", secondFalAction, falSettings);
+    const statusKey = activeSchedulerKey(scheduler, statusAction.id);
+    const falKey = activeSchedulerKey(scheduler, firstFalAction.id);
+    const statusImagesBefore = [...statusAction.images];
+
+    expect(activeSchedulerKey(scheduler, secondFalAction.id)).toBe(falKey);
+    shell.primeGlobalSettingsBaseline({ credentialProfiles: [], severityProfiles: [] });
+    await shell.handleGlobalSettingsChanged({
+      credentialProfiles: [
+        {
+          profileId: 123,
+        },
+      ],
+    });
+
+    expect(scheduler.globalSettingsChangeCount()).toBe(1);
+    expect(scheduler.lastGlobalSettingsChange()).toMatchObject({
+      change: {
+        bypassBackoffAllowed: true,
+        kind: "provider-source-affecting",
+        providerRefetchRequired: true,
+        reasons: ["global-settings-classification-failed"],
+      },
+      schedulerKeys: [falKey],
+    });
+    expect(scheduler.lastGlobalSettingsChange()?.schedulerKeys).not.toContain(statusKey);
+    expect(statusAction.images).toEqual(statusImagesBefore);
+    expect(scheduler.refreshCountFor(statusKey)).toBe(0);
+    expect(scheduler.lastDeactivationFor(statusAction.id)).toBeUndefined();
+    expect(firstFalAction.images).toHaveLength(2);
+    expect(secondFalAction.images).toHaveLength(2);
   });
 });
 
@@ -2284,6 +2675,103 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     expect(action.oks).toBe(0);
   });
 
+  it("routes Status through the shared appear, refresh, render, and key-feedback lifecycle", async () => {
+    const scheduler = new FakeScheduler();
+    const settings = {
+      familyId: "status",
+      providerId: "anthropic-api",
+    } as const;
+    const action = new FakeAction("action-status-lifecycle", settings);
+    const { shell } = createShell({ scheduler });
+
+    await shell.handleWillAppear("status", action, settings);
+    const keyParts = activeSchedulerKeyParts(scheduler, action.id);
+    const schedulerKey = serializeSchedulerKey(keyParts);
+    expect(keyParts).toEqual({
+      familyId: "status",
+      providerId: "anthropic-api",
+      credentialProfileId: "none",
+    });
+
+    scheduler.refreshOutput = {
+      activeRefCount: 1,
+      displayState: "fresh",
+      inFlight: false,
+      refreshIntervalSeconds: 600,
+      schedulerKey,
+      snapshot: {
+        familyId: "status",
+        providerId: "anthropic-api",
+        activeIncidentCount: 2,
+        highestImpact: "minor",
+        fetchedAtEpochMs: 1_000,
+      },
+    };
+
+    await shell.handleKeyDown("status", action);
+
+    expect(scheduler.lastRefreshKey()).toBe(schedulerKey);
+    expect(action.oks).toBe(1);
+    expect(decodeURIComponent(action.images.at(-1) ?? "")).toContain('data-part="status-value"');
+    expect(decodeURIComponent(action.images.at(-1) ?? "")).toContain(">2<");
+  });
+
+  it("renders OpenAI aggregate-only critical status through final tone without exposing indicator data", async () => {
+    const scheduler = new FakeScheduler();
+    const settings = {
+      familyId: "status",
+      providerId: "openai-api",
+    } as const;
+    const action = new FakeAction("action-openai-aggregate-status", settings);
+    const logEvents: SanitizedLogEvent[] = [];
+    const { shell } = createShell({ scheduler, logEvents });
+
+    await shell.handleWillAppear("status", action, settings);
+    const schedulerKey = activeSchedulerKey(scheduler, action.id);
+    scheduler.refreshOutput = {
+      activeRefCount: 1,
+      displayState: "fresh",
+      inFlight: false,
+      refreshIntervalSeconds: 600,
+      schedulerKey,
+      snapshot: {
+        familyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount: 0,
+        providerStatusIndicator: "critical",
+        fetchedAtEpochMs: 1_000,
+      },
+    };
+
+    await shell.handleKeyDown("status", action);
+
+    const rendered = decodeURIComponent(action.images.at(-1) ?? "");
+    expect(rendered).toContain('data-part="status-value"');
+    expect(rendered).toContain('fill="#e01e1e"');
+    expect(rendered).toContain(">0</text>");
+    expect(rendered).not.toContain("providerStatusIndicator");
+    expect(rendered).not.toContain(">critical<");
+    expect(JSON.stringify(logEvents)).not.toContain("critical");
+  });
+
+  it("gives same-provider Status instances one canonical shared scheduler key", async () => {
+    const scheduler = new FakeScheduler();
+    const settings = { familyId: "status", providerId: "openai-api" } as const;
+    const first = new FakeAction("status-shared-first", settings);
+    const second = new FakeAction("status-shared-second", settings);
+    const { shell } = createShell({ scheduler });
+
+    await shell.handleWillAppear("status", first, settings);
+    await shell.handleWillAppear("status", second, settings);
+
+    expect(activeSchedulerKey(scheduler, first.id)).toBe(activeSchedulerKey(scheduler, second.id));
+    expect(activeSchedulerKeyParts(scheduler, first.id)).toEqual({
+      familyId: "status",
+      providerId: "openai-api",
+      credentialProfileId: "none",
+    });
+  });
+
   it("deactivates the prior scheduler entry when received settings become invalid", async () => {
     const scheduler = new FakeScheduler();
     const action = new FakeAction("action-invalid-settings", balanceSettings);
@@ -2366,6 +2854,150 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     expect(svgFor(degraded)).not.toContain('data-part="failure-indicator"');
   });
 
+  it("renders Status operational, informational, warning, and critical counts through the explicit Status branch", () => {
+    const cases = [
+      [0, undefined, "operational", "#2ecc71"],
+      [0, undefined, "informational", "#3498db"],
+      [0, undefined, "warning", "#f39c12"],
+      [0, undefined, "critical", "#e01e1e"],
+      [2, "none", "informational", "#3498db"],
+      [3, "minor", "warning", "#f39c12"],
+      [4, "major", "critical", "#e01e1e"],
+      [5, "critical", "critical", "#e01e1e"],
+    ] as const;
+
+    for (const [activeIncidentCount, highestImpact, statusDisplayTone, color] of cases) {
+      const input: DisplayRendererInput = {
+        actionFamilyId: "status",
+        providerId: "openai-api",
+        activeIncidentCount,
+        ...(highestImpact === undefined ? {} : { highestImpact }),
+        statusDisplayTone,
+        valueText: String(activeIncidentCount),
+        displayState: "fresh",
+        stale: false,
+        freshness: "fresh",
+        fetchedAtEpochMs: 1_700_000_000_000,
+        headerLabel: "OpenAI",
+      };
+      const rendered = decodeURIComponent(renderDisplayInput(input, 1_700_000_000_000).image);
+
+      expect(rendered).toContain('data-part="status-value"');
+      expect(rendered).toContain('font-size="40"');
+      expect(rendered).toContain(`fill="${color}"`);
+      expect(rendered).toContain(`>${activeIncidentCount}</text>`);
+      expect(rendered).toContain('data-part="unit-row" x="72" y="101"');
+      expect(rendered).toContain('>incidents</text>');
+      expect(rendered).not.toContain('data-part="gauge-fill"');
+      expect(rendered).not.toContain('data-part="balance-value"');
+    }
+  });
+
+  it("shrink-fits the largest safe Status count without changing its value", () => {
+    const activeIncidentCount = Number.MAX_SAFE_INTEGER;
+    const input: DisplayRendererInput = {
+      actionFamilyId: "status",
+      providerId: "minimax",
+      activeIncidentCount,
+      highestImpact: "critical",
+      statusDisplayTone: "critical",
+      valueText: String(activeIncidentCount),
+      displayState: "fresh",
+      stale: false,
+      freshness: "fresh",
+      fetchedAtEpochMs: 1_700_000_000_000,
+      headerLabel: "MiniMax",
+    };
+
+    const rendered = decodeURIComponent(renderDisplayInput(input, 1_700_000_000_000).image);
+
+    expect(rendered).toContain('data-part="status-value"');
+    expect(rendered).toContain('font-size="12"');
+    expect(rendered).toContain(`>${activeIncidentCount}</text>`);
+  });
+
+  it("preserves a retained Status count and red tone with the existing stale indicator and age", () => {
+    const input: DisplayRendererInput = {
+      actionFamilyId: "status",
+      providerId: "moonshot",
+      activeIncidentCount: 4,
+      highestImpact: "major",
+      statusDisplayTone: "critical",
+      valueText: "4",
+      displayState: "stale",
+      stale: true,
+      freshness: "stale",
+      staleReason: "refresh-failed",
+      failureIndicator: "DATA ERROR",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      headerLabel: "Moonshot AI",
+    };
+
+    const rendered = decodeURIComponent(renderDisplayInput(input, 1_700_000_000_000).image);
+
+    expect(rendered).toContain('data-part="status-value"');
+    expect(rendered).toContain('fill="#e01e1e"');
+    expect(rendered).toContain(">4</text>");
+    expect(rendered).toContain('data-part="failure-indicator"');
+    expect(rendered).toContain(">DATA ERROR</text>");
+    expect(rendered).toContain('data-part="stale-badge"');
+    expect(rendered).toContain("16m");
+  });
+
+  it("renders no-snapshot Status validation failure as degraded and never as zero operational", () => {
+    const input = buildStatusRendererInput({
+      schedulerOutput: {
+        schedulerKey: "status|anthropic-api||none|",
+        displayState: "validation-drift",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+      },
+      providerId: "anthropic-api",
+      headerLabel: "Anthropic",
+    });
+    const rendered = decodeURIComponent(renderDisplayInput(input, 1_700_000_000_000).image);
+
+    expect(rendered).toContain('data-part="center-message"');
+    expect(rendered).toContain(">error</text>");
+    expect(rendered).not.toContain('data-part="status-value"');
+    expect(rendered).not.toContain('fill="#2ecc71"');
+    expect(rendered).not.toContain(">0</text>");
+  });
+
+  it("keeps Status SVG output invariant when ignored incident surfaces are attached to the renderer input", () => {
+    const input = {
+      actionFamilyId: "status",
+      providerId: "openai-api",
+      activeIncidentCount: 2,
+      highestImpact: "minor",
+      statusDisplayTone: "warning",
+      valueText: "2",
+      displayState: "fresh",
+      stale: false,
+      freshness: "fresh",
+      fetchedAtEpochMs: 1_700_000_000_000,
+      headerLabel: "OpenAI",
+    } as const satisfies DisplayRendererInput;
+    const withIgnoredSurfaces = {
+      ...input,
+      incidentTitle: "ignored incident title",
+      updateBody: "ignored update body",
+      components: ["ignored component"],
+      maintenance: "ignored maintenance",
+      modelName: "ignored model",
+      threshold: 1,
+    };
+
+    const expected = renderDisplayInput(input, 1_700_000_000_000);
+    const actual = renderDisplayInput(withIgnoredSurfaces, 1_700_000_000_000);
+
+    expect(actual).toEqual(expected);
+    for (const ignored of ["incident title", "update body", "component", "maintenance", "model", "threshold"]) {
+      expect(decodeURIComponent(actual.image)).not.toContain(ignored);
+    }
+  });
+
   it("renders a display-owned stale failure indicator beside the stale badge without replacing the retained value", () => {
     const retainedStale = {
       displayState: "stale",
@@ -2443,7 +3075,7 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
       usageWindow: "five-hour",
       valueLabel: "remaining",
       valueText: "99%",
-    } as DisplayRendererInput & { readonly usageWindow: "five-hour" };
+    } satisfies MetricDisplayRendererInput;
 
     const beforeReset = decodeURIComponent(renderDisplayInput(retainedUsage, now).image);
     expect(beforeReset).toContain(">99%</text>");
@@ -2509,7 +3141,7 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
       usageWindow: "seven-day",
       valueLabel: "remaining",
       valueText: "99%",
-    } as DisplayRendererInput & { readonly usageWindow: "seven-day" };
+    } satisfies MetricDisplayRendererInput;
 
     const beforeReset = decodeURIComponent(renderDisplayInput(retainedUsage, now).image);
     expect(beforeReset).toContain(">99%</text>");

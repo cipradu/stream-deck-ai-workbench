@@ -1,6 +1,6 @@
 import type { ActionFamilyId } from "./action-family.js";
 import type { CurrentPeriodCoverage, DisplayUnit, EvergreenCoverage, MetricDirection, MetricKind, SnapshotCoverage } from "./metrics.js";
-import type { BalanceProviderId, ProviderId, UsageProviderId } from "./providers.js";
+import type { BalanceProviderId, ProviderId, StatusProviderId, UsageProviderId } from "./providers.js";
 
 /**
  * Serializable timestamp: Unix epoch milliseconds (UTC). Chosen over ISO
@@ -16,13 +16,17 @@ export type EpochMilliseconds = number;
 export interface NormalizedSnapshotBase {
   readonly familyId: ActionFamilyId;
   readonly providerId: ProviderId;
+  readonly fetchedAtEpochMs: EpochMilliseconds;
+}
+
+/** Shared fields carried only by Usage and Balance metric snapshots. */
+export interface MetricSnapshotBase extends NormalizedSnapshotBase {
   readonly metricKind: MetricKind;
   readonly metricDirection: MetricDirection;
   readonly unit: DisplayUnit;
   readonly coverage: SnapshotCoverage;
   /** Normalized numeric value in `unit` semantics; for usage-percent this is percent used (0..100). */
   readonly value: number;
-  readonly fetchedAtEpochMs: EpochMilliseconds;
   /**
    * Next window/period reset moment when the vendor reports one (usage window
    * reset, balance period reset). Absent means no reset is scheduled — the
@@ -51,7 +55,7 @@ export interface NormalizedSnapshotBase {
  * Rolling-window percentage-used Usage snapshot (Claude Code / Codex 5h·7d,
  * z.ai windows). Upper-bound: severity worsens as the percentage rises.
  */
-export interface UsagePercentSnapshot extends NormalizedSnapshotBase {
+export interface UsagePercentSnapshot extends MetricSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-percent";
@@ -64,7 +68,7 @@ export interface UsagePercentSnapshot extends NormalizedSnapshotBase {
  * severity worsens as the remaining balance falls. Coverage is always
  * `evergreen` — a remaining pool with no window reset.
  */
-export interface UsageCreditsSnapshot extends NormalizedSnapshotBase {
+export interface UsageCreditsSnapshot extends MetricSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-credits";
@@ -79,7 +83,7 @@ export interface UsageCreditsSnapshot extends NormalizedSnapshotBase {
  * always `evergreen` (no window reset). `value` is the available count; `resetsAtEpochMs`,
  * when present, is the earliest upcoming reset-credit expiry and drives the countdown line.
  */
-export interface UsageResetsSnapshot extends NormalizedSnapshotBase {
+export interface UsageResetsSnapshot extends MetricSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-resets";
@@ -88,7 +92,7 @@ export interface UsageResetsSnapshot extends NormalizedSnapshotBase {
   readonly coverage: EvergreenCoverage;
 }
 
-interface UsageSpendActiveSnapshotBase extends NormalizedSnapshotBase {
+interface UsageSpendActiveSnapshotBase extends MetricSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-spend";
@@ -122,7 +126,7 @@ export type UsageSpendActiveSnapshot = UsageSpendCappedActiveSnapshot | UsageSpe
  * shows a neutral status word ("Off" / "Out"), and the out-of-credits state renders critical only
  * when `autoReloadOn`. The base `value` is `0` (never displayed; severity is not evaluated).
  */
-export interface UsageSpendStatusSnapshot extends NormalizedSnapshotBase {
+export interface UsageSpendStatusSnapshot extends MetricSnapshotBase {
   readonly familyId: "usage";
   readonly providerId: UsageProviderId;
   readonly metricKind: "usage-spend";
@@ -142,10 +146,84 @@ export type UsageSpendSnapshot = UsageSpendActiveSnapshot | UsageSpendStatusSnap
  */
 export type UsageSnapshot = UsagePercentSnapshot | UsageCreditsSnapshot | UsageResetsSnapshot | UsageSpendSnapshot;
 
-export interface BalanceSnapshot extends NormalizedSnapshotBase {
+export interface BalanceSnapshot extends MetricSnapshotBase {
   readonly familyId: "balance";
   readonly providerId: BalanceProviderId;
 }
+
+export const INCIDENT_LIFECYCLES = [
+  "investigating",
+  "identified",
+  "monitoring",
+  "resolved",
+  "postmortem",
+  "scheduled",
+  "in_progress",
+  "verifying",
+  "completed",
+] as const;
+export type IncidentLifecycle = (typeof INCIDENT_LIFECYCLES)[number];
+
+export const ACTIVE_INCIDENT_LIFECYCLES = ["investigating", "identified", "monitoring"] as const satisfies readonly IncidentLifecycle[];
+export type ActiveIncidentLifecycle = (typeof ACTIVE_INCIDENT_LIFECYCLES)[number];
+
+export const INCIDENT_IMPACTS = ["none", "minor", "major", "critical", "maintenance"] as const;
+export type IncidentImpact = (typeof INCIDENT_IMPACTS)[number];
+
+export const PROVIDER_STATUS_INDICATORS = ["none", "minor", "major", "critical", "maintenance"] as const;
+export type ProviderStatusIndicator = (typeof PROVIDER_STATUS_INDICATORS)[number];
+
+/** Impacts eligible for a normalized active-incident snapshot; maintenance is excluded by policy. */
+export const STATUS_INCIDENT_IMPACTS = ["none", "minor", "major", "critical"] as const satisfies readonly IncidentImpact[];
+export type StatusIncidentImpact = (typeof STATUS_INCIDENT_IMPACTS)[number];
+
+interface StatusSnapshotBase extends NormalizedSnapshotBase {
+  readonly familyId: "status";
+  readonly providerId: StatusProviderId;
+}
+
+export type StrictStatusProviderId = Exclude<StatusProviderId, "openai-api">;
+
+interface StrictStatusSnapshotBase extends StatusSnapshotBase {
+  readonly providerId: StrictStatusProviderId;
+  readonly providerStatusIndicator?: never;
+}
+
+interface OpenAIStatusSnapshotBase extends StatusSnapshotBase {
+  readonly providerId: "openai-api";
+  readonly providerStatusIndicator: ProviderStatusIndicator;
+}
+
+/** A strict-provider zero-count snapshot cannot carry aggregate status or a fabricated highest impact. */
+export interface StrictStatusOperationalSnapshot extends StrictStatusSnapshotBase {
+  readonly activeIncidentCount: 0;
+  readonly highestImpact?: never;
+}
+
+/** A strict-provider incident snapshot carries only incident-derived status. */
+export interface StrictStatusIncidentSnapshot extends StrictStatusSnapshotBase {
+  readonly activeIncidentCount: number;
+  readonly highestImpact: StatusIncidentImpact;
+}
+
+/** OpenAI zero-count status retains its required aggregate provider indicator. */
+export interface OpenAIStatusOperationalSnapshot extends OpenAIStatusSnapshotBase {
+  readonly activeIncidentCount: 0;
+  readonly highestImpact?: never;
+}
+
+/** OpenAI active-incident status keeps aggregate and incident axes distinct. */
+export interface OpenAIStatusIncidentSnapshot extends OpenAIStatusSnapshotBase {
+  readonly activeIncidentCount: number;
+  readonly highestImpact: StatusIncidentImpact;
+}
+
+export type StatusOperationalSnapshot = StrictStatusOperationalSnapshot | OpenAIStatusOperationalSnapshot;
+export type StatusIncidentSnapshot = StrictStatusIncidentSnapshot | OpenAIStatusIncidentSnapshot;
+export type StatusSnapshot = StatusOperationalSnapshot | StatusIncidentSnapshot;
+
+/** Usage/Balance-only union for consumers that require metric fields. */
+export type MetricSnapshot = UsageSnapshot | BalanceSnapshot;
 
 /**
  * Extensibility seam: snapshot shapes are keyed by family id; a future
@@ -154,6 +232,7 @@ export interface BalanceSnapshot extends NormalizedSnapshotBase {
 export interface ActionFamilySnapshotShapes {
   readonly usage: UsageSnapshot;
   readonly balance: BalanceSnapshot;
+  readonly status: StatusSnapshot;
 }
 
 export type NormalizedSnapshot = ActionFamilySnapshotShapes[ActionFamilyId];

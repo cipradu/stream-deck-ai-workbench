@@ -2,8 +2,11 @@ import {
   METRIC_KIND_DIRECTION,
   METRIC_KIND_UNIT,
   DEFAULT_RATE_LIMIT_DOMAIN,
+  STATUS_PROVIDER_IDS,
+  type ActionFamilyCapability,
   type ActionFamilyId,
   type AcceptedCoordinationEvidence,
+  type BalanceMetricKind,
   type CoverageKind,
   type CoordinationEvidence,
   type CredentialClass,
@@ -15,6 +18,7 @@ import {
   type NoCoordinationEvidence,
   type ProviderId,
   type ResolvedProviderCoordinationPolicy,
+  type UsageMetricKind,
   type UsageWindowId,
 } from "@ai-workbench/contracts";
 
@@ -116,15 +120,20 @@ export interface CapabilityCategoryMetric {
   readonly severityStrategy: SeverityStrategy;
 }
 
-export interface ProviderCapabilityMetadata {
-  readonly actionFamilyId: ActionFamilyId;
+export type MetricActionFamilyId = Exclude<ActionFamilyId, "status">;
+
+export interface ProviderCapabilityMetadata<
+  F extends MetricActionFamilyId = MetricActionFamilyId,
+  K extends MetricKind = MetricKind,
+> {
+  readonly actionFamilyId: F;
   readonly adapterBindingId: string;
   readonly implementationStatus: ImplementationStatus;
   readonly sourceProofStatus: SourceProofStatus;
   readonly credentialClasses: readonly CredentialClass[];
   readonly sensitiveSelectorRequirements: readonly SensitiveSelectorRequirement[];
   readonly requiredSettings: readonly ProviderSettingRequirement[];
-  readonly metricKind: MetricKind;
+  readonly metricKind: K;
   readonly metricDirection: MetricDirection;
   readonly displayUnit: DisplayUnit;
   readonly displayBasis: DisplayBasis;
@@ -147,9 +156,56 @@ export interface ProviderCapabilityMetadata {
  * registry boundary. Read-only consumers can continue to depend on the
  * narrower `ProviderCapabilityMetadata` shape when they do not need policy.
  */
-export interface ResolvedProviderCapabilityMetadata extends ProviderCapabilityMetadata {
+export interface ResolvedProviderCapabilityMetadata<
+  F extends MetricActionFamilyId = MetricActionFamilyId,
+  K extends MetricKind = MetricKind,
+> extends ProviderCapabilityMetadata<F, K> {
   readonly coordinationPolicy: ResolvedProviderCoordinationPolicy;
 }
+
+export type UsageProviderCapabilityMetadata = ProviderCapabilityMetadata<"usage", UsageMetricKind> &
+  ActionFamilyCapability<"usage"> & {
+    readonly metricKind: UsageMetricKind;
+  };
+
+export type BalanceProviderCapabilityMetadata = ProviderCapabilityMetadata<"balance", BalanceMetricKind> &
+  ActionFamilyCapability<"balance"> & {
+    readonly metricKind: BalanceMetricKind;
+  };
+
+export interface StatusProviderPresentationMetadata {
+  readonly pickerLabel: string;
+}
+
+export interface StatusProviderCapabilityMetadata extends ActionFamilyCapability<"status"> {
+  readonly actionFamilyId: "status";
+  readonly adapterBindingId: string;
+  readonly implementationStatus: ImplementationStatus;
+  readonly sourceProofStatus: SourceProofStatus;
+  readonly credentialClass: "none";
+  readonly presentation: StatusProviderPresentationMetadata;
+}
+
+export type ResolvedUsageProviderCapabilityMetadata = UsageProviderCapabilityMetadata & {
+  readonly coordinationPolicy: ResolvedProviderCoordinationPolicy;
+};
+
+export type ResolvedBalanceProviderCapabilityMetadata = BalanceProviderCapabilityMetadata & {
+  readonly coordinationPolicy: ResolvedProviderCoordinationPolicy;
+};
+
+export type ResolvedStatusProviderCapabilityMetadata = StatusProviderCapabilityMetadata & {
+  readonly coordinationPolicy: ResolvedProviderCoordinationPolicy;
+};
+
+export interface ResolvedRegistryProviderCapabilityMetadataByFamily {
+  readonly usage: ResolvedUsageProviderCapabilityMetadata;
+  readonly balance: ResolvedBalanceProviderCapabilityMetadata;
+  readonly status: ResolvedStatusProviderCapabilityMetadata;
+}
+
+export type ResolvedRegistryProviderCapabilityMetadata<F extends ActionFamilyId = ActionFamilyId> =
+  ResolvedRegistryProviderCapabilityMetadataByFamily[F];
 
 /** Effective metric metadata for one capability category, with direction/unit derived from `metricKind`. */
 export interface ResolvedCapabilityMetric {
@@ -184,10 +240,13 @@ export function resolveCapabilityMetricForWindow(
   };
 }
 
-export interface ProviderRegistryEntry<Id extends string = ProviderId> {
+export interface ProviderRegistryEntry<
+  Id extends string = ProviderId,
+  F extends ActionFamilyId = MetricActionFamilyId,
+> {
   readonly providerId: Id;
   readonly productLabel: string;
-  readonly capabilities: readonly ResolvedProviderCapabilityMetadata[];
+  readonly capabilities: readonly ResolvedRegistryProviderCapabilityMetadata<F>[];
 }
 
 export interface ImplementationStatusBehavior {
@@ -223,7 +282,10 @@ export const IMPLEMENTATION_STATUS_BEHAVIOR: Readonly<Record<ImplementationStatu
   },
 } as const;
 
-type CapabilityInput = Omit<ResolvedProviderCapabilityMetadata, "displayUnit" | "metricDirection" | "coordinationPolicy"> & {
+type CapabilityInput<F extends MetricActionFamilyId, K extends MetricKind> = Omit<
+  ResolvedProviderCapabilityMetadata<F, K>,
+  "displayUnit" | "metricDirection" | "coordinationPolicy"
+> & {
   readonly coordinationPolicy?: unknown;
 };
 
@@ -340,7 +402,9 @@ export function resolveProviderCoordinationPolicy(
   };
 }
 
-function capability(input: CapabilityInput): ResolvedProviderCapabilityMetadata {
+function capability<F extends MetricActionFamilyId, K extends MetricKind>(
+  input: CapabilityInput<F, K>,
+): ResolvedProviderCapabilityMetadata<F, K> {
   const { coordinationPolicy, ...metadata } = input;
   return {
     ...metadata,
@@ -397,26 +461,30 @@ function usageCapability(input: {
   readonly presentation?: ProviderPresentationMetadata;
   readonly unavailableReason?: string;
   readonly openDecision?: RegistryOpenDecision;
-}): ResolvedProviderCapabilityMetadata {
-  return capability({
-    actionFamilyId: "usage",
-    adapterBindingId: input.adapterBindingId,
-    implementationStatus: input.implementationStatus,
-    sourceProofStatus: input.sourceProofStatus,
-    credentialClasses: input.credentialClasses,
-    sensitiveSelectorRequirements: [],
-    requiredSettings: input.requiredSettings,
-    metricKind: "usage-percent",
-    displayBasis: "bounded-percentage",
-    coverageKind: "rolling-window",
+}): ResolvedUsageProviderCapabilityMetadata {
+  return {
+    ...capability({
+      actionFamilyId: "usage",
+      adapterBindingId: input.adapterBindingId,
+      implementationStatus: input.implementationStatus,
+      sourceProofStatus: input.sourceProofStatus,
+      credentialClasses: input.credentialClasses,
+      sensitiveSelectorRequirements: [],
+      requiredSettings: input.requiredSettings,
+      metricKind: "usage-percent",
+      displayBasis: "bounded-percentage",
+      coverageKind: "rolling-window",
+      supportedWindows: input.supportedWindows,
+      severityStrategy: usageSeverity,
+      ...(input.coordinationPolicy === undefined ? {} : { coordinationPolicy: input.coordinationPolicy }),
+      ...(input.categoryMetrics === undefined ? {} : { categoryMetrics: input.categoryMetrics }),
+      ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
+      ...(input.openDecision === undefined ? {} : { openDecision: input.openDecision }),
+    }),
+    familyId: "usage",
     supportedWindows: input.supportedWindows,
-    severityStrategy: usageSeverity,
-    ...(input.coordinationPolicy === undefined ? {} : { coordinationPolicy: input.coordinationPolicy }),
-    ...(input.categoryMetrics === undefined ? {} : { categoryMetrics: input.categoryMetrics }),
-    ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
-    ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
-    ...(input.openDecision === undefined ? {} : { openDecision: input.openDecision }),
-  });
+  };
 }
 
 function balanceCapability(input: {
@@ -426,28 +494,49 @@ function balanceCapability(input: {
   readonly credentialClasses: readonly CredentialClass[];
   readonly sensitiveSelectorRequirements?: readonly SensitiveSelectorRequirement[];
   readonly requiredSettings: readonly ProviderSettingRequirement[];
-  readonly metricKind: MetricKind;
+  readonly metricKind: BalanceMetricKind;
   readonly displayBasis: DisplayBasis;
   readonly coverageKind: CoverageKind;
   readonly severityStrategy: SeverityStrategy;
   readonly presentation?: ProviderPresentationMetadata;
   readonly unavailableReason?: string;
-}): ResolvedProviderCapabilityMetadata {
-  return capability({
-    actionFamilyId: "balance",
+}): ResolvedBalanceProviderCapabilityMetadata {
+  return {
+    ...capability({
+      actionFamilyId: "balance",
+      adapterBindingId: input.adapterBindingId,
+      implementationStatus: input.implementationStatus,
+      sourceProofStatus: input.sourceProofStatus,
+      credentialClasses: input.credentialClasses,
+      sensitiveSelectorRequirements: input.sensitiveSelectorRequirements ?? [],
+      requiredSettings: input.requiredSettings,
+      metricKind: input.metricKind,
+      displayBasis: input.displayBasis,
+      coverageKind: input.coverageKind,
+      severityStrategy: input.severityStrategy,
+      ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
+    }),
+    familyId: "balance",
+  };
+}
+
+function statusCapability(input: {
+  readonly adapterBindingId: string;
+  readonly pickerLabel: string;
+}): ResolvedStatusProviderCapabilityMetadata {
+  return {
+    familyId: "status",
+    actionFamilyId: "status",
     adapterBindingId: input.adapterBindingId,
-    implementationStatus: input.implementationStatus,
-    sourceProofStatus: input.sourceProofStatus,
-    credentialClasses: input.credentialClasses,
-    sensitiveSelectorRequirements: input.sensitiveSelectorRequirements ?? [],
-    requiredSettings: input.requiredSettings,
-    metricKind: input.metricKind,
-    displayBasis: input.displayBasis,
-    coverageKind: input.coverageKind,
-    severityStrategy: input.severityStrategy,
-    ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
-    ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
-  });
+    implementationStatus: "implemented",
+    sourceProofStatus: "probeAccepted",
+    credentialClass: "none",
+    presentation: {
+      pickerLabel: input.pickerLabel,
+    },
+    coordinationPolicy: DEFAULT_PROVIDER_COORDINATION_POLICY,
+  };
 }
 
 // Product labels, Balance ordering, per-provider credential labels/placeholders,
@@ -630,6 +719,10 @@ export const PROVIDER_REGISTRY = [
           authExpiredHint: "check API key",
         },
       }),
+      statusCapability({
+        adapterBindingId: "status.minimax",
+        pickerLabel: "MiniMax",
+      }),
     ],
   },
   {
@@ -654,6 +747,10 @@ export const PROVIDER_REGISTRY = [
           unitShortLabel: "USD",
           authExpiredHint: "needs admin key",
         },
+      }),
+      statusCapability({
+        adapterBindingId: "status.anthropic-api",
+        pickerLabel: "Anthropic",
       }),
     ],
   },
@@ -680,6 +777,10 @@ export const PROVIDER_REGISTRY = [
           authExpiredHint: "needs admin key",
         },
       }),
+      statusCapability({
+        adapterBindingId: "status.openai-api",
+        pickerLabel: "OpenAI",
+      }),
     ],
   },
   {
@@ -703,6 +804,10 @@ export const PROVIDER_REGISTRY = [
           unitShortLabel: "USD",
           authExpiredHint: "needs platform key",
         },
+      }),
+      statusCapability({
+        adapterBindingId: "status.moonshot",
+        pickerLabel: "Moonshot AI",
       }),
     ],
   },
@@ -924,21 +1029,21 @@ export const PROVIDER_REGISTRY = [
       }),
     ],
   },
-] as const satisfies readonly ProviderRegistryEntry[];
+] as const satisfies readonly ProviderRegistryEntry<ProviderId, ActionFamilyId>[];
 
 export interface ProviderAdapterBinding {
   readonly adapterBindingId: string;
 }
 
 export interface ProviderSelectionRequest {
-  readonly actionFamilyId: ActionFamilyId;
+  readonly actionFamilyId: MetricActionFamilyId;
   readonly adapterBindings: readonly ProviderAdapterBinding[];
 }
 
 export interface ProviderSelectionOption {
   readonly providerId: string;
   readonly productLabel: string;
-  readonly actionFamilyId: ActionFamilyId;
+  readonly actionFamilyId: MetricActionFamilyId;
   readonly adapterBindingId: string;
   readonly implementationStatus: ImplementationStatus;
   readonly metricKind: MetricKind;
@@ -946,25 +1051,101 @@ export interface ProviderSelectionOption {
   readonly displayUnit: DisplayUnit;
 }
 
-export function listProviderEntriesForFamily(actionFamilyId: ActionFamilyId): readonly ProviderRegistryEntry[] {
-  return PROVIDER_REGISTRY.filter((entry) =>
-    entry.capabilities.some((capabilityMetadata) => capabilityMetadata.actionFamilyId === actionFamilyId),
-  );
+export interface ResolvedProviderCapability<F extends ActionFamilyId = ActionFamilyId> {
+  readonly providerId: ProviderId;
+  readonly productLabel: string;
+  readonly pickerLabel: string;
+  readonly capability: ResolvedRegistryProviderCapabilityMetadata<F>;
 }
 
-export function findProviderEntry(providerId: string): ProviderRegistryEntry | undefined {
+function findRegistryEntry(providerId: string): (typeof PROVIDER_REGISTRY)[number] | undefined {
   return PROVIDER_REGISTRY.find((entry) => entry.providerId === providerId);
 }
 
+function isCapabilityForFamily<F extends ActionFamilyId>(
+  capabilityMetadata: ResolvedRegistryProviderCapabilityMetadata,
+  actionFamilyId: F,
+): capabilityMetadata is ResolvedRegistryProviderCapabilityMetadata<F> {
+  return capabilityMetadata.familyId === actionFamilyId;
+}
+
+function isMetricCapability(
+  capabilityMetadata: ResolvedRegistryProviderCapabilityMetadata,
+): capabilityMetadata is ResolvedRegistryProviderCapabilityMetadata<MetricActionFamilyId> {
+  return capabilityMetadata.familyId === "usage" || capabilityMetadata.familyId === "balance";
+}
+
+export function resolveProviderCapability<F extends ActionFamilyId>(
+  providerId: string,
+  actionFamilyId: F,
+): ResolvedProviderCapability<F> | undefined {
+  const entry = findRegistryEntry(providerId);
+  const capabilityMetadata = entry?.capabilities.find((candidate) => isCapabilityForFamily(candidate, actionFamilyId));
+  if (entry === undefined || capabilityMetadata === undefined) {
+    return undefined;
+  }
+
+  return {
+    providerId: entry.providerId,
+    productLabel: entry.productLabel,
+    pickerLabel:
+      capabilityMetadata.familyId === "status"
+        ? capabilityMetadata.presentation.pickerLabel
+        : entry.productLabel,
+    capability: capabilityMetadata,
+  };
+}
+
+export function listProviderCapabilitiesForFamily<F extends ActionFamilyId>(
+  actionFamilyId: F,
+): readonly ResolvedProviderCapability<F>[] {
+  const providerIds: readonly string[] =
+    actionFamilyId === "status"
+      ? STATUS_PROVIDER_IDS
+      : PROVIDER_REGISTRY.map((entry) => entry.providerId);
+
+  return providerIds.flatMap((providerId) => {
+    const resolved = resolveProviderCapability(providerId, actionFamilyId);
+    return resolved === undefined ? [] : [resolved];
+  });
+}
+
+export function listProviderEntriesForFamily<F extends ActionFamilyId>(
+  actionFamilyId: F,
+): readonly ProviderRegistryEntry<ProviderId, F>[] {
+  return listProviderCapabilitiesForFamily(actionFamilyId).map(({ providerId, productLabel, capability }) => ({
+    providerId,
+    productLabel,
+    capabilities: [capability],
+  }));
+}
+
+/**
+ * Backward-compatible metric entry lookup. Family-specific callers should use
+ * `resolveProviderCapability` so non-metric capabilities cannot leak into a
+ * metric-only consumer.
+ */
+export function findProviderEntry(providerId: string): ProviderRegistryEntry | undefined {
+  const entry = findRegistryEntry(providerId);
+  if (entry === undefined) {
+    return undefined;
+  }
+  return {
+    providerId: entry.providerId,
+    productLabel: entry.productLabel,
+    capabilities: entry.capabilities.filter(isMetricCapability),
+  };
+}
+
 export function deriveProviderSelectionOptions(
-  registry: readonly ProviderRegistryEntry<string>[],
+  registry: readonly ProviderRegistryEntry<string, ActionFamilyId>[],
   request: ProviderSelectionRequest,
 ): readonly ProviderSelectionOption[] {
   const implementedAdapterBindingIds = new Set(request.adapterBindings.map((binding) => binding.adapterBindingId));
 
   return registry.flatMap((entry) =>
     entry.capabilities
-      .filter((capabilityMetadata) => capabilityMetadata.actionFamilyId === request.actionFamilyId)
+      .filter((capabilityMetadata) => isCapabilityForFamily(capabilityMetadata, request.actionFamilyId))
       .filter((capabilityMetadata) => IMPLEMENTATION_STATUS_BEHAVIOR[capabilityMetadata.implementationStatus].selectionEligible)
       .filter((capabilityMetadata) => implementedAdapterBindingIds.has(capabilityMetadata.adapterBindingId))
       .map((capabilityMetadata) => ({

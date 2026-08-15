@@ -7,11 +7,16 @@ import type {
   NormalizedSnapshot,
   ProviderId,
   REFRESH_INTERVAL_DEFAULT_SECONDS,
+  StatusProviderId,
   UsageProviderId,
   UsageWindowId,
 } from "@ai-workbench/contracts";
 import type { SanitizedFailure } from "@ai-workbench/errors";
-import type { ProviderCapabilityMetadata, SourceProofStatus } from "@ai-workbench/provider-registry";
+import type {
+  ProviderCapabilityMetadata,
+  SourceProofStatus,
+  StatusProviderCapabilityMetadata,
+} from "@ai-workbench/provider-registry";
 import type { SchedulerFetch } from "@ai-workbench/scheduler";
 
 import type { AdapterSourceFlightRuntimeCapability } from "./source-flight-runtime.js";
@@ -51,7 +56,23 @@ export interface BalanceProviderAdapterBinding {
   readonly fetch: SchedulerFetch;
 }
 
-export type ProviderAdapterBinding = UsageProviderAdapterBinding | BalanceProviderAdapterBinding;
+export interface StatusProviderAdapterBinding {
+  readonly adapterBindingId: string;
+  readonly providerId: StatusProviderId;
+  readonly actionFamilyId: "status";
+  readonly implementationStatus: StatusProviderCapabilityMetadata["implementationStatus"];
+  readonly sourceProofStatus: SourceProofStatus;
+  readonly credentialClass: "none";
+  readonly fetchAllowed: boolean;
+  readonly sourceAccess: ProviderAdapterSourceAccess;
+  readonly refreshIntervalSeconds: typeof REFRESH_INTERVAL_DEFAULT_SECONDS;
+  readonly retryOwner: "scheduler";
+  readonly errorOwner: "shared-errors";
+  readonly displayOwner: "display-boundary";
+  readonly fetch: SchedulerFetch;
+}
+
+export type ProviderAdapterBinding = UsageProviderAdapterBinding | BalanceProviderAdapterBinding | StatusProviderAdapterBinding;
 
 export interface CreateSourceGatedUsageFetchInput {
   readonly providerId: UsageProviderId;
@@ -62,6 +83,12 @@ export interface CreateSourceGatedUsageFetchInput {
 export interface CreateSourceGatedBalanceFetchInput {
   readonly providerId: ProviderId;
   readonly capability: ProviderCapabilityMetadata;
+  readonly sourceFetch?: SchedulerFetch;
+}
+
+export interface CreateSourceGatedStatusFetchInput {
+  readonly providerId: StatusProviderId;
+  readonly capability: StatusProviderCapabilityMetadata;
   readonly sourceFetch?: SchedulerFetch;
 }
 
@@ -170,6 +197,11 @@ export interface CreateBalanceProviderSourceFetchInput extends ProviderSourceFet
 export interface CreateUsageProviderSourceFetchInput extends ProviderSourceFetchInputBase {
   readonly providerId: UsageProviderId;
   readonly localSources?: UsageProviderLocalSourceReaders;
+}
+
+export interface CreateStatusProviderSourceFetchInput {
+  readonly providerId: StatusProviderId;
+  readonly sourceFlightRuntime?: AdapterSourceFlightRuntimeCapability;
 }
 
 export interface NormalizeBalanceProviderResponseInput {

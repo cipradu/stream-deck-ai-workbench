@@ -420,3 +420,113 @@ describe("@ai-workbench/logging Effect Logger sink", () => {
     expect(captured.map((event) => event.level)).toEqual(["debug", "debug", "info", "warn", "error", "error"]);
   });
 });
+
+describe("@ai-workbench/logging best-effort sink isolation", () => {
+  const event = createSanitizedLogEvent({
+    eventName: "sink-isolation",
+    level: "info",
+    message: "safe fixture event",
+  });
+
+  class RejectingThenable implements PromiseLike<void> {
+    calls = 0;
+
+    then<TResult1 = void, TResult2 = never>(
+      onfulfilled?: ((value: void) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ): PromiseLike<TResult1 | TResult2> {
+      this.calls += 1;
+      return Promise.reject(new Error("fabricated sink rejection")).then(onfulfilled, onrejected);
+    }
+  }
+
+  class ThrowingThenable implements PromiseLike<void> {
+    calls = 0;
+
+    then<TResult1 = void, TResult2 = never>(
+      _onfulfilled?: ((value: void) => TResult1 | PromiseLike<TResult1>) | null,
+      _onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ): PromiseLike<TResult1 | TResult2> {
+      this.calls += 1;
+      throw new Error("fabricated throwing thenable");
+    }
+  }
+
+  it("keeps the plain writer resolved when the sink throws synchronously", async () => {
+    await expect(
+      writeSanitizedLogEvent(
+        {
+          write: () => {
+            throw new Error("fabricated synchronous sink failure");
+          },
+        },
+        event,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("keeps the plain writer resolved when a native Promise rejects", async () => {
+    await expect(
+      writeSanitizedLogEvent(
+        {
+          write: () => Promise.reject(new Error("fabricated native Promise rejection")),
+        },
+        event,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("adopts and contains a rejecting non-Promise thenable", async () => {
+    const outcome = new RejectingThenable();
+
+    await expect(writeSanitizedLogEvent({ write: () => outcome }, event)).resolves.toBeUndefined();
+    expect(outcome.calls).toBe(1);
+    expect(outcome).not.toBeInstanceOf(Promise);
+  });
+
+  it("contains a non-Promise thenable whose then method throws", async () => {
+    const outcome = new ThrowingThenable();
+
+    await expect(writeSanitizedLogEvent({ write: () => outcome }, event)).resolves.toBeUndefined();
+    expect(outcome.calls).toBe(1);
+  });
+
+  it("keeps a successful enclosing Effect successful when sink delivery fails", async () => {
+    const outcome = new RejectingThenable();
+    const sink: StreamDeckLogSink = { write: () => outcome };
+
+    await expect(
+      Effect.runPromise(
+        Effect.logInfo("safe fixture event").pipe(
+          Effect.zipRight(Effect.succeed("original-success")),
+          Effect.provide(makeStreamDeckLoggerLayer(sink)),
+        ),
+      ),
+    ).resolves.toBe("original-success");
+    await Promise.resolve();
+    expect(outcome.calls).toBe(1);
+  });
+
+  it("keeps an enclosing typed failure unchanged when the sink throws synchronously", async () => {
+    const originalFailure = { _tag: "FixtureTypedFailure" as const };
+    const sink: StreamDeckLogSink = {
+      write: () => {
+        throw new Error("fabricated synchronous sink failure");
+      },
+    };
+
+    const outcome = await Effect.runPromise(
+      Effect.either(
+        Effect.logWarning("safe fixture warning").pipe(
+          Effect.zipRight(Effect.fail(originalFailure)),
+          Effect.provide(makeStreamDeckLoggerLayer(sink)),
+        ),
+      ),
+    );
+
+    expect(outcome._tag).toBe("Left");
+    if (outcome._tag === "Left") {
+      expect(outcome.left).toBe(originalFailure);
+    }
+  });
+});

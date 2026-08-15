@@ -44,6 +44,9 @@ importers:
       '@ai-workbench/action-balance':
         specifier: workspace:*
         version: link:../../packages/action-balance
+      '@ai-workbench/action-status':
+        specifier: workspace:*
+        version: link:../../packages/action-status
       '@ai-workbench/action-usage':
         specifier: workspace:*
         version: link:../../packages/action-usage
@@ -104,6 +107,18 @@ importers:
       '@ai-workbench/settings':
         specifier: workspace:*
         version: link:../settings
+
+  packages/action-status:
+    dependencies:
+      '@ai-workbench/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@ai-workbench/display':
+        specifier: workspace:*
+        version: link:../display
+      '@ai-workbench/provider-registry':
+        specifier: workspace:*
+        version: link:../provider-registry
 
   packages/action-usage:
     dependencies:
@@ -175,6 +190,9 @@ importers:
 
   packages/provider-adapters:
     dependencies:
+      '@ai-workbench/action-status':
+        specifier: workspace:*
+        version: link:../action-status
       '@ai-workbench/contracts':
         specifier: workspace:*
         version: link:../contracts

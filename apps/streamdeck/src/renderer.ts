@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { DisplayRendererInput } from "@ai-workbench/display";
+import type { DisplayRendererInput, MetricDisplayRendererInput, StatusValueRendererInput } from "@ai-workbench/display";
 import type { SanitizedFailure } from "@ai-workbench/errors";
 
 import { prepareLogoSvg, type PreparedLogo } from "./logo-loader.js";
@@ -30,6 +30,7 @@ const keyColors = {
   dim: "#9aa0a6",
   track: "#3a3f46",
   normal: "#2ecc71",
+  informational: "#3498db",
   warning: "#f39c12",
   critical: "#e01e1e",
 } as const;
@@ -51,6 +52,10 @@ export function renderDisplayInput(input: DisplayRendererInput, now: number): Re
   if (input.freshness === "degraded") {
     const degraded = degradedMessage(input);
     return { image: toDataUri(svgShell(header + centeredMessage(degraded.lines, degraded.color))) };
+  }
+
+  if (input.actionFamilyId === "status") {
+    return { image: toDataUri(svgShell(header + statusBody(input, now))) };
   }
 
   // Usage PERCENT keys carry a bounded percentage (progressPercent) and use the gauge layout.
@@ -93,7 +98,7 @@ export function displayInputFromFailure(failure: SanitizedFailure): DisplayRende
 // Usage layout (old key-svg.ts): percent, mode label, gauge, reset line.
 // ---------------------------------------------------------------------------
 
-function usageBody(input: DisplayRendererInput, now: number): string {
+function usageBody(input: MetricDisplayRendererInput, now: number): string {
   const modeLabel = input.valueLabel === "remaining" ? "left" : "used";
   const color = severityColorFor(input);
   const expiredKimiRollingWindow = shouldDefaultExpiredKimiRollingWindow(input, now);
@@ -127,7 +132,7 @@ function usageBody(input: DisplayRendererInput, now: number): string {
   ].join("");
 }
 
-function shouldDefaultExpiredKimiRollingWindow(input: DisplayRendererInput, now: number): boolean {
+function shouldDefaultExpiredKimiRollingWindow(input: MetricDisplayRendererInput, now: number): boolean {
   return (
     input.providerId === "kimi-code" &&
     (input.usageWindow === "five-hour" || input.usageWindow === "seven-day") &&
@@ -144,7 +149,7 @@ function shouldDefaultExpiredKimiRollingWindow(input: DisplayRendererInput, now:
 // coverage/reset marker, last-checked clock.
 // ---------------------------------------------------------------------------
 
-function balanceBody(input: DisplayRendererInput, now: number): string {
+function balanceBody(input: MetricDisplayRendererInput, now: number): string {
   const stale = input.freshness === "stale";
   // The credit-spend off/out-of-credits status keys route through
   // this non-gauge body and drive a NON-severity tone: neutral dim ("Off" / "Out") by default, or
@@ -180,6 +185,18 @@ function balanceBody(input: DisplayRendererInput, now: number): string {
       : `<text data-part="last-checked" x="72" y="43" text-anchor="middle" font-family="sans-serif" font-size="12" fill="${keyColors.dim}">&#10003; ${formatClockTime(input.fetchedAtEpochMs)}</text>`;
 
   return staleTopRow(input, now) + amount + unitRow + marker + checked;
+}
+
+function statusBody(input: StatusValueRendererInput, now: number): string {
+  const stale = input.freshness === "stale";
+  const checked =
+    stale || input.fetchedAtEpochMs === undefined
+      ? ""
+      : `<text data-part="last-checked" x="72" y="43" text-anchor="middle" font-family="sans-serif" font-size="12" fill="${keyColors.dim}">&#10003; ${formatClockTime(input.fetchedAtEpochMs)}</text>`;
+  const count = `<text data-part="status-value" x="72" y="80" text-anchor="middle" font-family="sans-serif" font-size="${fitFontSize(input.valueText)}" font-weight="bold" fill="${statusColorFor(input)}">${escapeXml(input.valueText)}</text>`;
+  const unitRow = `<text data-part="unit-row" x="72" y="101" text-anchor="middle" font-family="sans-serif" font-size="15" fill="${keyColors.dim}">incidents</text>`;
+
+  return staleTopRow(input, now) + checked + count + unitRow;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +279,21 @@ function centeredMessage(lines: readonly string[], color: string): string {
     .join("");
 }
 
-function severityColorFor(input: DisplayRendererInput): string {
+function severityColorFor(input: MetricDisplayRendererInput): string {
   return keyColors[input.rendererSeverityState];
+}
+
+function statusColorFor(input: StatusValueRendererInput): string {
+  switch (input.statusDisplayTone) {
+    case "operational":
+      return keyColors.normal;
+    case "informational":
+      return keyColors.informational;
+    case "warning":
+      return keyColors.warning;
+    case "critical":
+      return keyColors.critical;
+  }
 }
 
 function staleTopRow(input: DisplayRendererInput, now: number): string {
@@ -280,7 +310,7 @@ function failureIndicator(input: DisplayRendererInput): string {
 function staleBadge(input: DisplayRendererInput, now: number): string {
   // Local-fallback snapshots always carry the badge (old plugin honesty:
   // the value did not come from the provider's live endpoint).
-  const stale = input.freshness === "stale" || input.sourceFallback === true;
+  const stale = input.freshness === "stale" || (input.actionFamilyId !== "status" && input.sourceFallback === true);
   if (!stale || input.fetchedAtEpochMs === undefined) {
     return "";
   }

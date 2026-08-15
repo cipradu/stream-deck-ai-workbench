@@ -6,7 +6,7 @@ import {
   type BalanceMetricKind,
   type BalanceProviderId,
   type CoverageKind,
-  type NormalizedSnapshot,
+  type MetricSnapshot,
 } from "@ai-workbench/contracts";
 import type { SanitizedFailure } from "@ai-workbench/errors";
 import { findProviderEntry, type ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
@@ -132,7 +132,7 @@ function balanceCapabilityForProvider(providerId: BalanceProviderId): ProviderCa
   return findProviderEntry(providerId)?.capabilities.find((capability) => capability.actionFamilyId === "balance");
 }
 
-function coverageFromKind(coverageKind: Exclude<CoverageKind, "rolling-window">): NormalizedSnapshot["coverage"] {
+function coverageFromKind(coverageKind: Exclude<CoverageKind, "rolling-window">): MetricSnapshot["coverage"] {
   switch (coverageKind) {
     case "evergreen":
       return { kind: "evergreen" };

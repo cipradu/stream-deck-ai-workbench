@@ -1,20 +1,20 @@
 # AI Workbench
 
-A local macOS **Stream Deck plugin** that puts live AI-tooling **usage** and account **balances** on your Stream Deck keys. The current catalog implements plan usage for five AI coding tools and balance, spend, credit, token, character, or used-time metrics for twelve AI API vendors.
+A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, account **balances**, and public provider **incident status** on your Stream Deck keys. The current catalog implements plan usage for five AI coding tools, balance/spend/credit/token/character/used-time metrics for twelve AI API vendors, and active-incident status for four providers.
 
 ![AI Workbench on a Stream Deck XL](assets/preview.jpg)
 
 *A fully configured Stream Deck XL running AI Workbench — sample data, not real account values.*
 
-> **Personal / educational project.** It is **not affiliated with, endorsed by, or supported by** any of the vendors it integrates with. It talks to each vendor's own APIs using **your own credentials**, and several providers rely on **undocumented endpoints** that can change or break at any time. See [Disclaimers](#disclaimers--legal) before using or distributing it.
+> **Personal / educational project.** It is **not affiliated with, endorsed by, or supported by** any of the vendors it integrates with. Usage and Balance integrations use **your own credentials**; Status reads public provider status feeds without credentials. Several integrations rely on **undocumented endpoints** that can change or break at any time. See [Disclaimers](#disclaimers--legal) before using or distributing it.
 
 ---
 
 ## Current status
 
-- **Plugin version:** `0.2.0.5`
-- **Actions:** Usage and Balance
-- **Implemented catalog:** 5 Usage providers and 12 Balance providers
+- **Plugin version:** `0.2.0.12`
+- **Actions:** Usage, Balance, and Status
+- **Implemented catalog:** 5 Usage providers, 12 Balance providers, and 4 Status providers
 - **Distribution:** this repository's install path is a source build linked into Stream Deck
 - **Platform:** macOS 14+, Stream Deck 7.1+, and Stream Deck's bundled Node 24 runtime
 
@@ -22,12 +22,13 @@ Every provider listed below has an implemented, selectable adapter. That does no
 
 ## What it is
 
-AI Workbench is a self-hosted Stream Deck plugin you build and install yourself. It adds two action types to Stream Deck:
+AI Workbench is a self-hosted Stream Deck plugin you build and install yourself. It adds three action types to Stream Deck:
 
 - **Usage** — rolling plan-window percentages plus provider-specific categories such as credits, reset credits, and extra-usage spend.
 - **Balance** — an AI API vendor's remaining balance, or its month‑to‑date/current‑period spend, plainly labeled.
+- **Status** — the count of provider-reported active incidents. OpenAI color also reflects aggregate provider status from its public page; the other providers remain incident-impact-only.
 
-Each key polls on an interval, renders a compact SVG (value, gauge or amount, a context line, a reset/coverage marker, and a "last checked" clock), and colors itself according to the metric's direction and its built-in or user-supplied thresholds.
+Each key polls through the shared scheduler and renders a compact SVG. Usage and Balance keys show their metric, context, freshness, and direction-aware threshold color. Status keys show a prominent active-incident count, provider identity, freshness, and a provider-wide color derived from source-backed Status data.
 
 ## Supported providers
 
@@ -60,6 +61,17 @@ Each key polls on an interval, renders a compact SVG (value, gauge or amount, a 
 
 Exact fields come from each vendor's own billing/usage API; some vendors expose only spend/usage history rather than a remaining balance, which is why those keys show spend.
 
+### Status
+
+| Provider | What the key shows |
+| --- | --- |
+| **Anthropic** | Provider-reported active incident count; color uses highest active incident impact |
+| **OpenAI** | Provider-reported active incident count; color uses the worse of highest active incident impact and aggregate provider status |
+| **Moonshot AI** | Provider-reported active incident count; color uses highest active incident impact |
+| **MiniMax** | Provider-reported active incident count; color uses highest active incident impact |
+
+Status uses each provider's public no-credential status source. It counts only incidents reported as investigating, identified, or monitoring. For Anthropic, Moonshot AI, and MiniMax, zero active incidents is green; a positive count with impact `none` is blue; `minor` is amber; and `major` or `critical` is red. OpenAI keeps the active-incident count as the primary value, but its color is the worse independently mapped value of highest active incident impact and aggregate provider status reported by the public page. OpenAI aggregate `none` is green, `maintenance` is blue, `minor` is amber, and `major` or `critical` is red. Resolved and postmortem incidents, scheduled maintenance records, components, and other page detail are excluded. The result is a provider-wide signal, not a component, model, or customer-specific availability claim. DeepSeek is deferred because its public feed does not provide the required structured impact, and Z.AI has no approved public Status source.
+
 ## How it's displayed
 
 - **Percentage Usage windows** render a **progress-bar gauge**, the percentage, a **used / remaining** context line, and a **countdown to the next reset**. Absolute Usage categories use amount or status layouts instead.
@@ -67,8 +79,9 @@ Exact fields come from each vendor's own billing/usage API; some vendors expose 
 - **Claude Code Credits** (extra-usage spend) renders the % of your monthly cap consumed with a `$used / $cap` line; when the feature is off or out of credits it shows a status word instead of a misleading gauge.
 - **Kimi Code Extra Usage** renders only the amount spent, such as `$12.50`; it is not a percentage and has no invented cap. When Extra Usage is disabled, the key renders **Off**.
 - **Codex Resets** renders the reset‑credit count with a countdown to the earliest expiry.
+- **Status keys** render the active-incident count prominently. Anthropic, Moonshot AI, and MiniMax color comes from highest active incident impact. OpenAI color is the worse independently mapped value of highest active incident impact and aggregate provider status. Status color does not use user thresholds.
 - **Severity colors** are **direction-aware**: usage, spend, and used-time keys move **amber → red** as the value rises; remaining balances, credits, tokens, and characters move amber → red as the value falls. Percentage windows default to amber at 80% and red at 90%. Absolute-value overrides use the displayed unit: dollars for Claude/Kimi extra usage, credits for Codex Credits, and days of runway for Codex Resets.
-- Pressing a configured key requests an immediate refresh. Background polling defaults to 600 seconds and accepts values from 60 to 3600 seconds.
+- Pressing a configured key requests an immediate refresh under the shared backoff policy. Usage and Balance polling defaults to 600 seconds and accepts values from 60 to 3600 seconds. Status has no refresh setting: it uses a fixed 600-second healthy cadence, becomes age-stale after 20 minutes, and expires retained stale data after 24 hours.
 
 ## Requirements
 
@@ -109,7 +122,7 @@ The plugin runs on the Node runtime bundled with Stream Deck. After editing plug
 
 ## Configuration
 
-Each Stream Deck key is configured from its **Property Inspector**:
+Usage and Balance keys are configured from their **Property Inspector**:
 
 1. Add a **Usage** or **Balance** action to a key.
 2. Pick the **provider / vendor**.
@@ -118,12 +131,15 @@ Each Stream Deck key is configured from its **Property Inspector**:
 5. Choose **Used %** or **Remaining %** for percentage windows.
 6. Optionally set **amber / red thresholds** where the selected metric supports them, and set the **refresh interval** in seconds.
 
+Status has a Provider-only Property Inspector. Add **Status** to a key and choose Anthropic, OpenAI, Moonshot AI, or MiniMax; first placement defaults to Anthropic. Status has no credential, threshold, window, component filter, or refresh control.
+
 ## Credentials & security
 
 - **Local-source credentials stay behind provider-specific readers.** Claude Code is read from the macOS Keychain, Codex from `~/.codex/auth.json`, and Kimi Code from its local credential file. The plugin does not write token material directly.
 - **Claude Code and Kimi Code have bounded expiry recovery.** When a locally known token is expired, or the provider rejects it as expired, the plugin runs the provider's official CLI once in a temporary isolated directory, waits up to 60 seconds, rereads the credential, and retries the request once. The CLI may update its own credential store. If recovery fails, the key shows an authentication-required state and the next normal poll may try again.
 - **Codex does not launch a recovery command.** It rereads the locally managed credential once after an unauthorized response; running or reopening Codex remains the way to renew that login.
 - **API keys** (z.ai, MiniMax, and every Balance vendor) are entered in the Property Inspector and stored in Stream Deck **global settings**, not per-action settings that can be exported with a profile.
+- **Status needs no credentials.** Its provider sources are public, and Status settings contain only the selected provider.
 - **Some Balance vendors require privileged keys.** For example, reading Anthropic organization spend requires an **admin API key**, which carries broad organization privileges. Only provide keys whose scope you are comfortable with, and prefer the narrowest key a vendor offers.
 - **Moonshot and Kimi Code use different credentials.** The Moonshot Balance provider requires an open-platform API key; it does not accept the Kimi Code coding credential.
 - **Bring your own keys, and never commit them.** Secrets, tokens, account identifiers, and raw vendor responses are kept out of rendered output and sanitized diagnostics by design.
@@ -136,7 +152,7 @@ An Effect‑centered TypeScript **pnpm monorepo**. Cross‑cutting concerns live
 - `packages/provider-registry` — the provider/action‑family catalog (windows, units, severity strategy, credential class).
 - `packages/settings` · `validation` · `errors` · `logging` · `http` · `scheduler` · `display` — the central settings, edge‑validation, typed‑error, sanitizing‑log, HTTP, retry/backoff, and rendering boundaries.
 - `packages/runtime-foundation` — Effect runtime composition and safe Promise bridges.
-- `packages/action-usage` · `action-balance` · `provider-adapters` — action‑family semantics and per‑provider adapters.
+- `packages/action-usage` · `action-balance` · `action-status` · `provider-adapters` — action‑family semantics and per‑provider adapters.
 - `apps/streamdeck` — the Stream Deck SDK shell, manifest, Property Inspectors, renderer, and composition root.
 
 ## Development
@@ -145,6 +161,7 @@ An Effect‑centered TypeScript **pnpm monorepo**. Cross‑cutting concerns live
 pnpm run build              # build all packages + the plugin bundle
 pnpm test                   # vitest (unit tests, no live vendor calls)
 pnpm run typecheck          # tsc across all packages
+pnpm run verify:unit016     # full local verification gate
 pnpm --filter @ai-workbench/streamdeck watch  # rebuild and restart the plugin on source changes
 ```
 

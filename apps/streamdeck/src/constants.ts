@@ -5,3 +5,4 @@ export const PLUGIN_UUID = "com.blackice.ai-workbench" as const;
 // saved profiles keep resolving to these actions.
 export const USAGE_ACTION_UUID = `${PLUGIN_UUID}.usage-display` as const;
 export const BALANCE_ACTION_UUID = `${PLUGIN_UUID}.balance-display` as const;
+export const STATUS_ACTION_UUID = `${PLUGIN_UUID}.status-display` as const;

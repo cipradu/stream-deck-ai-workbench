@@ -14,7 +14,7 @@ import {
   type SeverityThresholdSet,
   type SnapshotCoverage,
 } from "../../contracts/src/index.js";
-import { findProviderEntry } from "../../provider-registry/src/index.js";
+import { resolveProviderCapability } from "../../provider-registry/src/index.js";
 import type { SchedulerOutput } from "../../scheduler/src/index.js";
 import type { NormalizedActionSettingsView } from "../../settings/src/index.js";
 import {
@@ -184,7 +184,7 @@ describe("Balance catalog and settings coverage", () => {
 
   it("keeps Balance provider option truth derived from registry capability metadata", () => {
     for (const option of listBalanceProviderOptions()) {
-      const capability = findProviderEntry(option.providerId)?.capabilities.find((candidate) => candidate.actionFamilyId === "balance");
+      const capability = resolveProviderCapability(option.providerId, "balance")?.capability;
 
       expect(capability).toBeDefined();
       expect(option.metricKind).toBe(capability?.metricKind);
@@ -192,6 +192,23 @@ describe("Balance catalog and settings coverage", () => {
       expect(option.unit).toBe(capability?.displayUnit);
       expect(option.coverageKind).toBe(capability?.coverageKind);
     }
+  });
+
+  it("resolves Moonshot Balance from its Balance capability when the provider also has Status", () => {
+    expect(resolveBalanceProviderOption({ providerId: "moonshot" })).toMatchObject({
+      ok: true,
+      value: {
+        providerId: "moonshot",
+        productLabel: "Moonshot",
+        actionFamilyId: "balance",
+        metricKind: "remaining-balance",
+        capability: {
+          familyId: "balance",
+          actionFamilyId: "balance",
+          metricKind: "remaining-balance",
+        },
+      },
+    });
   });
 });
 

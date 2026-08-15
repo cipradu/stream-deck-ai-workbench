@@ -64,7 +64,7 @@ export interface CreateSanitizedLogEventInput {
 }
 
 export interface StreamDeckLogSink {
-  readonly write: (event: SanitizedLogEvent) => void | Promise<void>;
+  readonly write: (event: SanitizedLogEvent) => void | PromiseLike<void>;
 }
 
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
@@ -168,8 +168,8 @@ export function createSanitizedLogEvent(input: CreateSanitizedLogEventInput): Sa
   };
 }
 
-export async function writeSanitizedLogEvent(sink: StreamDeckLogSink, event: SanitizedLogEvent): Promise<void> {
-  await sink.write(event);
+export function writeSanitizedLogEvent(sink: StreamDeckLogSink, event: SanitizedLogEvent): Promise<void> {
+  return writeToSink(sink, event);
 }
 
 function stringInSet<const Values extends readonly string[]>(
@@ -338,11 +338,20 @@ function logLevelOf(level: EffectLogLevel.LogLevel): LogLevel {
   }
 }
 
-function writeToSink(sink: StreamDeckLogSink, event: SanitizedLogEvent): void {
-  const outcome = sink.write(event);
-  // The logger runs inside a fiber and must never crash it; if a sink returns a
-  // rejected promise, drop it rather than surface it as a defect.
-  if (outcome instanceof Promise) {
-    outcome.catch(() => undefined);
+function writeToSink(sink: StreamDeckLogSink, event: SanitizedLogEvent): Promise<void> {
+  let outcome: void | PromiseLike<void>;
+  try {
+    outcome = sink.write(event);
+  } catch {
+    return Promise.resolve();
   }
+
+  // Promise.resolve adopts native Promises and arbitrary PromiseLike/thenable
+  // values. Its rejection handler also contains a thenable whose `then` throws.
+  // This is the physical last-sink boundary, so failures are dropped without
+  // attempting recursive logging.
+  return Promise.resolve(outcome).then(
+    () => undefined,
+    () => undefined,
+  );
 }

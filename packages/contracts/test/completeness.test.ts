@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACTIVE_INCIDENT_LIFECYCLES,
   ACTION_FAMILY_IDS,
   BALANCE_METRIC_KINDS,
   BALANCE_PROVIDER_IDS,
@@ -10,12 +11,18 @@ import {
   DISPLAY_UNITS,
   ERROR_CATEGORIES,
   IMPLEMENTATION_STATUSES,
+  INCIDENT_IMPACTS,
+  INCIDENT_LIFECYCLES,
   METRIC_DIRECTIONS,
   METRIC_KINDS,
+  PROVIDER_STATUS_INDICATORS,
   PROVIDER_IDS,
   RETRY_CLASSES,
   SEVERITY_LEVELS,
   SEVERITY_STATES,
+  STATUS_INCIDENT_IMPACTS,
+  STATUS_PROVIDER_IDS,
+  STATUS_TONES,
   USAGE_METRIC_KINDS,
   USAGE_PROVIDER_IDS,
   USAGE_WINDOW_IDS,
@@ -29,9 +36,9 @@ function asSortedSet(values: readonly string[]): readonly string[] {
 }
 
 describe("action families", () => {
-  it("contains exactly the two first action families", () => {
-    expect(asSortedSet(ACTION_FAMILY_IDS)).toEqual(["balance", "usage"]);
-    expect(ACTION_FAMILY_IDS).toHaveLength(2);
+  it("contains usage, balance, and status and every shape map covers it", () => {
+    expect(asSortedSet(ACTION_FAMILY_IDS)).toEqual(["balance", "status", "usage"]);
+    expect(ACTION_FAMILY_IDS).toHaveLength(3);
   });
 });
 
@@ -59,10 +66,37 @@ describe("provider identifiers", () => {
     expect(BALANCE_PROVIDER_IDS).toHaveLength(12);
   });
 
+  it("reuses exactly four existing provider ids for Status", () => {
+    expect(STATUS_PROVIDER_IDS).toEqual(["anthropic-api", "openai-api", "moonshot", "minimax"]);
+    expect(STATUS_PROVIDER_IDS.every((providerId) => PROVIDER_IDS.includes(providerId))).toBe(true);
+    expect(new Set(STATUS_PROVIDER_IDS).size).toBe(STATUS_PROVIDER_IDS.length);
+  });
+
   it("exposes all seventeen catalog providers with no duplicates", () => {
     expect(asSortedSet(PROVIDER_IDS)).toEqual(asSortedSet([...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS]));
     expect(PROVIDER_IDS).toHaveLength(17);
     expect(new Set(PROVIDER_IDS).size).toBe(17);
+  });
+});
+
+describe("status vocabulary", () => {
+  it("declares exact lifecycle, active-lifecycle, impact, and tone values", () => {
+    expect(INCIDENT_LIFECYCLES).toEqual([
+      "investigating",
+      "identified",
+      "monitoring",
+      "resolved",
+      "postmortem",
+      "scheduled",
+      "in_progress",
+      "verifying",
+      "completed",
+    ]);
+    expect(ACTIVE_INCIDENT_LIFECYCLES).toEqual(["investigating", "identified", "monitoring"]);
+    expect(INCIDENT_IMPACTS).toEqual(["none", "minor", "major", "critical", "maintenance"]);
+    expect(PROVIDER_STATUS_INDICATORS).toEqual(["none", "minor", "major", "critical", "maintenance"]);
+    expect(STATUS_INCIDENT_IMPACTS).toEqual(["none", "minor", "major", "critical"]);
+    expect(STATUS_TONES).toEqual(["operational", "informational", "warning", "critical"]);
   });
 });
 

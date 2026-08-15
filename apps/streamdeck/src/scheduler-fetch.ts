@@ -3,10 +3,12 @@ import { resolveUsageProviderOption } from "@ai-workbench/action-usage";
 import {
   BALANCE_PROVIDER_IDS,
   COVERAGE_KINDS,
+  STATUS_PROVIDER_IDS,
   USAGE_PROVIDER_IDS,
   USAGE_WINDOW_IDS,
   type BalanceProviderId,
   type CoverageKind,
+  type StatusProviderId,
   type UsageProviderId,
   type UsageWindowId,
 } from "@ai-workbench/contracts";
@@ -17,6 +19,7 @@ import {
   createBalanceProviderSourceFetchEffect,
   createSourceGatedBalanceFetchEffect,
   createSourceGatedUsageFetchEffect,
+  createStatusProviderSourceFetchEffect,
   createUsageProviderSourceFetchEffect,
   type AdapterSourceFlightRuntimeCapability,
   type UsageProviderLocalSourceReaders,
@@ -167,6 +170,20 @@ function createSchedulerFetchWithoutLogging(
 ): SchedulerEffectFetch {
   const httpClientLayer = options.httpClientLayer ?? fetchHttpClientLayer;
 
+  if (settings.familyId === "status") {
+    if (!isStatusProviderId(settings.providerId)) {
+      return failureFetch("status-action-settings-invalid");
+    }
+    const sourceFetch = createStatusProviderSourceFetchEffect({
+      providerId: settings.providerId,
+      sourceFlightRuntime: options.sourceFlightRuntime,
+    });
+    if (sourceFetch === undefined) {
+      return failureFetch("status-action-source-unavailable");
+    }
+    return (request) => sourceFetch(request).pipe(Effect.provide(httpClientLayer));
+  }
+
   if (settings.familyId === "usage") {
     if (!isUsageProviderId(settings.providerId) || !isUsageWindowId(settings.windowOrPeriod)) {
       return failureFetch("usage-action-settings-invalid");
@@ -201,37 +218,41 @@ function createSchedulerFetchWithoutLogging(
     return (request) => gated(request).pipe(Effect.provide(httpClientLayer));
   }
 
-  if (!isBalanceProviderId(settings.providerId)) {
-    return failureFetch("balance-action-settings-invalid");
+  if (settings.familyId === "balance") {
+    if (!isBalanceProviderId(settings.providerId)) {
+      return failureFetch("balance-action-settings-invalid");
+    }
+    const windowOrPeriod = isCoverageKind(settings.windowOrPeriod) ? settings.windowOrPeriod : undefined;
+    const resolved = resolveBalanceProviderOption({
+      providerId: settings.providerId,
+      ...(windowOrPeriod === undefined ? {} : { windowOrPeriod }),
+    });
+    if (!resolved.ok) {
+      return sanitizedFailureFetch(resolved.failure);
+    }
+    const rateLimitDomain = resolved.value.capability.coordinationPolicy.rateLimitDomain;
+    const sourceFetch = createBalanceProviderSourceFetchEffect({
+      providerId: resolved.value.providerId,
+      baseUrl: BALANCE_PROVIDER_BASE_URLS[resolved.value.providerId],
+      sourceFlightRuntime: options.sourceFlightRuntime,
+      credentialProfileId: settings.schedulerKeyParts.credentialProfileId,
+      rateLimitDomain,
+      resolveCredential: async () =>
+        resolveCredentialMaterialFromGlobalSettings({
+          actionSettings: settings,
+          globalSettings: await options.readGlobalSettings(),
+        }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    const gated = createSourceGatedBalanceFetchEffect({
+      providerId: resolved.value.providerId,
+      capability: resolved.value.capability,
+      ...(sourceFetch === undefined ? {} : { sourceFetch }),
+    });
+    return (request) => gated(request).pipe(Effect.provide(httpClientLayer));
   }
-  const windowOrPeriod = isCoverageKind(settings.windowOrPeriod) ? settings.windowOrPeriod : undefined;
-  const resolved = resolveBalanceProviderOption({
-    providerId: settings.providerId,
-    ...(windowOrPeriod === undefined ? {} : { windowOrPeriod }),
-  });
-  if (!resolved.ok) {
-    return sanitizedFailureFetch(resolved.failure);
-  }
-  const rateLimitDomain = resolved.value.capability.coordinationPolicy.rateLimitDomain;
-  const sourceFetch = createBalanceProviderSourceFetchEffect({
-    providerId: resolved.value.providerId,
-    baseUrl: BALANCE_PROVIDER_BASE_URLS[resolved.value.providerId],
-    sourceFlightRuntime: options.sourceFlightRuntime,
-    credentialProfileId: settings.schedulerKeyParts.credentialProfileId,
-    rateLimitDomain,
-    resolveCredential: async () =>
-      resolveCredentialMaterialFromGlobalSettings({
-        actionSettings: settings,
-        globalSettings: await options.readGlobalSettings(),
-      }),
-    ...(options.now === undefined ? {} : { now: options.now }),
-  });
-  const gated = createSourceGatedBalanceFetchEffect({
-    providerId: resolved.value.providerId,
-    capability: resolved.value.capability,
-    ...(sourceFetch === undefined ? {} : { sourceFetch }),
-  });
-  return (request) => gated(request).pipe(Effect.provide(httpClientLayer));
+
+  return failureFetch("action-family-invalid");
 }
 
 function failureFetch(reasonCode: string): SchedulerEffectFetch {
@@ -257,6 +278,10 @@ function isUsageProviderId(providerId: string): providerId is UsageProviderId {
 
 function isBalanceProviderId(providerId: string): providerId is BalanceProviderId {
   return (BALANCE_PROVIDER_IDS as readonly string[]).includes(providerId);
+}
+
+function isStatusProviderId(providerId: string): providerId is StatusProviderId {
+  return (STATUS_PROVIDER_IDS as readonly string[]).includes(providerId);
 }
 
 function isUsageWindowId(windowOrPeriod: string | undefined): windowOrPeriod is UsageWindowId {
