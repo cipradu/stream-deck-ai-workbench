@@ -67,6 +67,16 @@ const LEGACY_BALANCE_PROVIDER_IDS = {
 } as const satisfies Readonly<Record<string, ProviderId>>;
 const LEGACY_BALANCE_PROVIDER_LOOKUP: Readonly<Record<string, ProviderId>> = LEGACY_BALANCE_PROVIDER_IDS;
 
+/** Legacy Balance PI vendor id (the `vendor` dropdown value) for a canonical provider id. */
+export function legacyBalanceVendorIdForProvider(providerId: ProviderId): string | undefined {
+  for (const [vendorId, canonical] of Object.entries(LEGACY_BALANCE_PROVIDER_LOOKUP)) {
+    if (canonical === providerId) {
+      return vendorId;
+    }
+  }
+  return undefined;
+}
+
 const LEGACY_USAGE_WINDOWS = {
   five_hour: "five-hour",
   weekly: "seven-day",
@@ -194,6 +204,8 @@ export interface WritableActionSettings {
   readonly severityProfileRef?: NormalizedActionSettingsView["severityProfileRef"];
   readonly windowOrPeriod?: SchedulerWindowOrPeriod;
   readonly metricVariant?: string;
+  readonly peakPricingEnabled?: boolean;
+  readonly peakHours?: string;
 }
 
 export interface WritableSeverityProfile {
@@ -217,6 +229,8 @@ export function toWritableActionSettings(settings: NormalizedActionSettingsView)
     ...(settings.severityProfileRef === undefined ? {} : { severityProfileRef: settings.severityProfileRef }),
     ...(settings.windowOrPeriod === undefined ? {} : { windowOrPeriod: settings.windowOrPeriod }),
     ...(settings.metricVariant === undefined ? {} : { metricVariant: settings.metricVariant }),
+    ...(settings.peakPricingEnabled === false ? {} : { peakPricingEnabled: settings.peakPricingEnabled }),
+    ...(settings.peakHours === undefined ? {} : { peakHours: settings.peakHours }),
   };
 }
 
@@ -373,6 +387,8 @@ function normalizeBalanceActionSettingsInput(input: Readonly<Record<string, unkn
     ...(severityProfileRef === undefined ? {} : { severityProfileRef }),
     ...(windowOrPeriod === undefined ? {} : { windowOrPeriod }),
     ...(typeof input.metricVariant === "string" ? { metricVariant: input.metricVariant } : {}),
+    ...(typeof input.peakPricingEnabled === "boolean" ? { peakPricingEnabled: input.peakPricingEnabled } : {}),
+    ...(typeof input.peakHours === "string" ? { peakHours: input.peakHours } : {}),
   };
 }
 

@@ -34,6 +34,7 @@ import type {
 import {
   classifyActionSettingsChange,
   parseActionSettings,
+  parsePeakHoursWindows,
   parsePropertyInspectorPayload,
   type NormalizedActionSettingsView,
 } from "@ai-workbench/settings";
@@ -60,9 +61,11 @@ import {
 } from "../src/local-usage-sources.js";
 import {
   defaultActionSettingsForFamily,
+  legacyBalanceVendorIdForProvider,
   legacySeverityProfileForBalanceInput,
   legacySeverityProfileForUsageInput,
   parseActionSettingsForFamily,
+  toWritableActionSettings,
   withLegacyCredentialProfiles,
   type WritableActionSettings,
 } from "../src/settings.js";
@@ -372,6 +375,7 @@ describe("scheduler fetch-path logging", () => {
       providerId: "fal",
       refreshIntervalSeconds: 600,
       displayPreferences: {},
+      peakPricingEnabled: false,
       schedulerKeyParts: {
         familyId: "status",
         providerId: "fal",
@@ -1000,6 +1004,45 @@ describe("Property Inspector registry data and static UI", () => {
     expect(balanceHtml).not.toContain("Not available yet");
   });
 
+  it("mirrors the Balance peak-pricing controls against the registry descriptor set (parity guard)", async () => {
+    const balanceHtml = await readFile(propertyInspectorPath("balance-display.html"), "utf8");
+
+    // Controls exist, hidden by default, on sdpi self-saving bindings.
+    expect(balanceHtml).toContain('class="peak-pricing" id="peak-pricing-toggle" label="Peak pricing" style="display: none"');
+    expect(balanceHtml).toContain('<sdpi-checkbox setting="peakPricingEnabled">');
+    expect(balanceHtml).toContain('class="peak-pricing" id="peak-pricing-hours" label="Peak hours (UTC)" style="display: none"');
+    expect(balanceHtml).toContain('<sdpi-textfield setting="peakHours"');
+
+    // The PI's capable set equals the registry's peak-pricing descriptor set.
+    const vendorsMatch = /const PEAK_PRICING_VENDORS = (\[[^\]]*\]);/.exec(balanceHtml);
+    expect(vendorsMatch).not.toBeNull();
+    const piCapableVendors = JSON.parse(vendorsMatch?.[1] ?? "null") as readonly string[];
+    const registryCapable = listBalanceProviderOptions().filter((option) => option.peakPricing !== undefined);
+    const registryCapableVendors = registryCapable.map((option) => {
+      const vendorId = legacyBalanceVendorIdForProvider(option.providerId);
+      expect(vendorId).toBeDefined();
+      return vendorId;
+    });
+    expect([...piCapableVendors].sort()).toEqual([...registryCapableVendors].sort());
+    expect(registryCapable.map((option) => option.providerId)).toEqual(["deepseek"]);
+
+    // The PI's default-window copy equals each capable provider's registry default, and
+    // every registry default string round-trips through the settings window parser.
+    const defaultsMatch = /const PEAK_HOURS_DEFAULTS = (\{[^}]*\});/.exec(balanceHtml);
+    expect(defaultsMatch).not.toBeNull();
+    const piDefaults = JSON.parse(defaultsMatch?.[1] ?? "null") as Readonly<Record<string, string>>;
+    for (const option of registryCapable) {
+      const vendorId = legacyBalanceVendorIdForProvider(option.providerId);
+      const descriptor = option.peakPricing;
+      expect(descriptor).toBeDefined();
+      const expectedWindows = descriptor?.defaultUtcWindows ?? [];
+      expect(piDefaults[vendorId ?? ""]).toBe(expectedWindows.join(", "));
+      for (const windowString of expectedWindows) {
+        expect(parsePeakHoursWindows(windowString).kind).toBe("windows");
+      }
+    }
+  });
+
   it("keeps both panels on sdpi setting bindings so every control saves itself", async () => {
     const usageHtml = await readFile(propertyInspectorPath("usage-display.html"), "utf8");
     const balanceHtml = await readFile(propertyInspectorPath("balance-display.html"), "utf8");
@@ -1060,6 +1103,44 @@ describe("settings boundary and PI writes", () => {
         providerId: "anthropic-api",
       },
     });
+  });
+
+  it("threads peak-pricing fields through the Balance app seam and writable projection", () => {
+    const parsed = parseActionSettingsForFamily("balance", {
+      vendor: "deepseek",
+      peakPricingEnabled: true,
+      peakHours: "01:00-04:00, 06:00-10:00",
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        familyId: "balance",
+        providerId: "deepseek",
+        peakPricingEnabled: true,
+        peakHours: "01:00-04:00, 06:00-10:00",
+      },
+    });
+    if (!parsed.ok) {
+      throw new Error("expected valid balance settings");
+    }
+    expect(toWritableActionSettings(parsed.value)).toMatchObject({
+      peakPricingEnabled: true,
+      peakHours: "01:00-04:00, 06:00-10:00",
+    });
+
+    const defaults = parseActionSettingsForFamily("balance", { vendor: "deepseek" });
+    expect(defaults).toMatchObject({ ok: true, value: { peakPricingEnabled: false } });
+    if (!defaults.ok) {
+      throw new Error("expected valid balance defaults");
+    }
+    expect(toWritableActionSettings(defaults.value)).not.toHaveProperty("peakPricingEnabled");
+    expect(toWritableActionSettings(defaults.value)).not.toHaveProperty("peakHours");
+  });
+
+  it("rejects a malformed Balance peak-hours string through the app seam", () => {
+    expect(
+      parseActionSettingsForFamily("balance", { vendor: "deepseek", peakPricingEnabled: true, peakHours: "nope" }),
+    ).toMatchObject({ ok: false });
   });
 
   it("normalizes empty Status settings to Anthropic at 600 seconds with no credential identity", () => {
@@ -3021,6 +3102,64 @@ describe("action lifecycle, scheduler handoff, and renderer states", () => {
     expect(rendered).toContain('data-part="stale-badge" x="138" y="42" text-anchor="end"');
     expect(rendered).toContain('data-part="balance-value"');
     expect(rendered).toContain("$42.00");
+  });
+
+  it("renders the peak-pricing phase row with non-severity tones on fresh and stale balance keys", () => {
+    const base = {
+      displayState: "fresh",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "fresh",
+      headerLabel: "DeepSeek",
+      rendererSeverityState: "normal",
+      severity: "healthy",
+      stale: false,
+      valueLabel: "remaining",
+      valueText: "$12.34",
+    } as MetricDisplayRendererInput;
+
+    const peak = decodeURIComponent(renderDisplayInput({ ...base, pricingPhase: { phase: "peak", tone: "amber" } }, 1_700_000_000_000).image);
+    expect(peak).toContain('data-part="pricing-phase"');
+    expect(peak).toContain(">peak hrs</text>");
+    expect(peak).toContain(`fill="${"#f39c12"}"`);
+    expect(peak).toContain('data-part="balance-value"');
+
+    const offPeak = decodeURIComponent(renderDisplayInput({ ...base, pricingPhase: { phase: "off-peak", tone: "dim" } }, 1_700_000_000_000).image);
+    expect(offPeak).toContain(">off-peak</text>");
+    expect(offPeak).not.toContain("peak hrs");
+
+    const stale = decodeURIComponent(
+      renderDisplayInput(
+        { ...base, displayState: "stale", freshness: "stale", stale: true, staleReason: "refresh-failed", pricingPhase: { phase: "peak", tone: "amber" } },
+        1_700_000_000_000,
+      ).image,
+    );
+    expect(stale).toContain('data-part="pricing-phase"');
+    expect(stale).toContain(">peak hrs</text>");
+  });
+
+  it("renders no peak-pricing row when the annotation is absent or the key is degraded", () => {
+    const base = {
+      displayState: "fresh",
+      fetchedAtEpochMs: 1_699_999_000_000,
+      freshness: "fresh",
+      headerLabel: "Fal",
+      rendererSeverityState: "normal",
+      severity: "healthy",
+      stale: false,
+      valueLabel: "remaining",
+      valueText: "$42.00",
+    } as DisplayRendererInput;
+
+    const rendered = decodeURIComponent(renderDisplayInput(base, 1_700_000_000_000).image);
+    expect(rendered).not.toContain('data-part="pricing-phase"');
+
+    const degraded = decodeURIComponent(
+      renderDisplayInput(
+        { displayState: "network-failure", freshness: "degraded", rendererSeverityState: "normal", severity: "not-evaluated", stale: false, valueText: "network" } as DisplayRendererInput,
+        1_700_000_000_000,
+      ).image,
+    );
+    expect(degraded).not.toContain('data-part="pricing-phase"');
   });
 
   it("renders a display-owned stale failure indicator in the usage layout without replacing the retained value or gauge", () => {

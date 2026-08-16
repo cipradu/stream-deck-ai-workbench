@@ -15,6 +15,7 @@ import {
   type CredentialClass,
   type CredentialProfileReference,
   type MetricDirection,
+  type PeakPricingWindow,
   type ProviderId,
   type SchedulerKey,
   type SchedulerKeyParts,
@@ -69,6 +70,10 @@ export interface NormalizedActionSettingsView {
   readonly severityProfileRef?: SeverityProfileReference;
   readonly windowOrPeriod?: SchedulerWindowOrPeriod;
   readonly metricVariant?: string;
+  /** Peak-pricing indicator toggle; normalized to false when unset. Display-gated by the provider's registry descriptor. */
+  readonly peakPricingEnabled: boolean;
+  /** Validated `HH:MM-HH:MM` UTC window list; absent means the capable provider's registry default applies. */
+  readonly peakHours?: string;
   readonly schedulerKeyParts: SchedulerKeyParts;
   readonly schedulerKey: SchedulerKey;
 }
@@ -221,6 +226,8 @@ const ActionSettingsPayloadSchema = Schema.Struct({
   severityProfileRef: Schema.optional(SeverityProfileReferenceSchema),
   windowOrPeriod: Schema.optional(WindowOrPeriodSchema),
   metricVariant: Schema.optional(Schema.String),
+  peakPricingEnabled: Schema.optional(Schema.Boolean),
+  peakHours: Schema.optional(Schema.String),
 });
 
 const StatusActionSettingsPayloadSchema = Schema.Struct({
@@ -374,6 +381,8 @@ const ALLOWED_ACTION_SETTING_KEYS = new Set([
   "severityProfileRef",
   "windowOrPeriod",
   "metricVariant",
+  "peakPricingEnabled",
+  "peakHours",
 ]);
 
 const ALLOWED_STATUS_ACTION_SETTING_KEYS = new Set(["familyId", "providerId", "refreshIntervalSeconds"]);
@@ -383,6 +392,57 @@ const ALLOWED_DISPLAY_PREFERENCE_KEYS = new Set(["usageDisplayMode", "label", "c
 const ALLOWED_CREDENTIAL_PROFILE_REFERENCE_KEYS = new Set(["kind", "credentialClass", "profileId"]);
 
 const ALLOWED_SEVERITY_PROFILE_REFERENCE_KEYS = new Set(["kind", "profileId"]);
+
+/** Result of parsing the PI's peak-hours window list: provider default, a valid window set, or invalid input. */
+export type PeakHoursParseResult =
+  | { readonly kind: "default" }
+  | { readonly kind: "windows"; readonly windows: readonly PeakPricingWindow[] }
+  | { readonly kind: "invalid" };
+
+const PEAK_HOURS_TOKEN_PATTERN = /^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/;
+
+/**
+ * Parses the editable peak-hours string: comma-separated `HH:MM-HH:MM` UTC ranges.
+ * Whitespace around tokens is trimmed; midnight-wrapping ranges (start > end) are
+ * valid; overlapping/duplicate windows are accepted (union semantics downstream);
+ * start must differ from end. An empty or whitespace-only string means "use the
+ * provider's registry default". Any other shape is invalid and fails closed.
+ */
+export function parsePeakHoursWindows(input: string): PeakHoursParseResult {
+  if (input.trim() === "") {
+    return { kind: "default" };
+  }
+
+  const windows: PeakPricingWindow[] = [];
+  for (const rawToken of input.split(",")) {
+    const token = rawToken.trim();
+    const match = PEAK_HOURS_TOKEN_PATTERN.exec(token);
+    if (match === null) {
+      return { kind: "invalid" };
+    }
+    const [startHour, startMinute, endHour, endMinute] = match.slice(1).map(Number);
+    if (
+      startHour === undefined ||
+      startMinute === undefined ||
+      endHour === undefined ||
+      endMinute === undefined ||
+      startHour > 23 ||
+      endHour > 23 ||
+      startMinute > 59 ||
+      endMinute > 59
+    ) {
+      return { kind: "invalid" };
+    }
+    const start = startHour * 60 + startMinute;
+    const end = endHour * 60 + endMinute;
+    if (start === end) {
+      return { kind: "invalid" };
+    }
+    windows.push({ startMinutesUtc: start, endMinutesUtc: end });
+  }
+
+  return { kind: "windows", windows };
+}
 
 export function parseActionSettings(input: unknown): SettingsResult<NormalizedActionSettingsView> {
   if (isRecord(input) && input.familyId === "status") {
@@ -429,6 +489,19 @@ export function parseActionSettings(input: unknown): SettingsResult<NormalizedAc
     return settingsValidationFailure("action-settings-refresh-interval-out-of-range", ["refreshIntervalSeconds"]);
   }
 
+  // Peak-hours windows: present-but-malformed fails closed for any non-Status family;
+  // empty/whitespace is stored as absent so the capable provider's registry default applies.
+  let peakHours: string | undefined;
+  if (parsed.value.peakHours !== undefined) {
+    const windows = parsePeakHoursWindows(parsed.value.peakHours);
+    if (windows.kind === "invalid") {
+      return settingsValidationFailure("action-settings-peak-hours-invalid", ["peakHours"]);
+    }
+    if (windows.kind === "windows") {
+      peakHours = parsed.value.peakHours;
+    }
+  }
+
   const credentialProfileId = parsed.value.credentialProfileRef?.profileId ?? "none";
   const schedulerKeyParts: SchedulerKeyParts = {
     familyId: parsed.value.familyId,
@@ -449,6 +522,8 @@ export function parseActionSettings(input: unknown): SettingsResult<NormalizedAc
       ...(parsed.value.severityProfileRef === undefined ? {} : { severityProfileRef: parsed.value.severityProfileRef }),
       ...(parsed.value.windowOrPeriod === undefined ? {} : { windowOrPeriod: parsed.value.windowOrPeriod }),
       ...(parsed.value.metricVariant === undefined ? {} : { metricVariant: parsed.value.metricVariant }),
+      peakPricingEnabled: parsed.value.peakPricingEnabled ?? false,
+      ...(peakHours === undefined ? {} : { peakHours }),
       schedulerKeyParts,
       schedulerKey: serializeSchedulerKey(schedulerKeyParts),
     },
@@ -493,6 +568,7 @@ function parseStatusActionSettings(input: Readonly<Record<string, unknown>>): Se
       providerId,
       refreshIntervalSeconds,
       displayPreferences: {},
+      peakPricingEnabled: false,
       schedulerKeyParts,
       schedulerKey: serializeSchedulerKey(schedulerKeyParts),
     },
@@ -1049,6 +1125,9 @@ function displayChangeReasons(
   }
   if (before.severityProfileRef?.profileId !== after.severityProfileRef?.profileId) {
     reasons.push("severity-profile-reference-changed");
+  }
+  if (before.peakPricingEnabled !== after.peakPricingEnabled || before.peakHours !== after.peakHours) {
+    reasons.push("peak-pricing-changed");
   }
 
   return reasons;

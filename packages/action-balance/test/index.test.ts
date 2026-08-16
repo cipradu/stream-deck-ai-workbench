@@ -38,6 +38,7 @@ function balanceSettings(providerId: BalanceProviderId, windowOrPeriod?: Coverag
     providerId,
     refreshIntervalSeconds: REFRESH_INTERVAL_DEFAULT_SECONDS,
     displayPreferences: {},
+    peakPricingEnabled: false,
     ...(windowOrPeriod === undefined ? {} : { windowOrPeriod }),
     schedulerKeyParts,
     schedulerKey: serializeSchedulerKey(schedulerKeyParts),

@@ -78,6 +78,17 @@
 		<sdpi-textfield setting="intervalSeconds" type="number" placeholder="600 (min 60)"></sdpi-textfield>
 	</sdpi-item>
 
+	<!-- Peak-pricing phase indicator: visible only for vendors whose registry capability
+	     declares peak/off-peak billing (PEAK_PRICING_VENDORS below — DeepSeek today). The
+	     schedule is UTC and informational: it never changes the displayed value. Keep the
+	     capable set and default windows in lockstep with the provider registry. -->
+	<sdpi-item class="peak-pricing" id="peak-pricing-toggle" label="Peak pricing" style="display: none">
+		<sdpi-checkbox setting="peakPricingEnabled"></sdpi-checkbox>
+	</sdpi-item>
+	<sdpi-item class="peak-pricing" id="peak-pricing-hours" label="Peak hours (UTC)" style="display: none">
+		<sdpi-textfield setting="peakHours" placeholder="01:00-04:00, 06:00-10:00"></sdpi-textfield>
+	</sdpi-item>
+
 	<script>
 		// Vendor capability copy mirrors the provider registry's presentation metadata
 		// (old plugin setting vocabulary and copy) — keep the two in lockstep.
@@ -97,6 +108,14 @@
 		};
 
 		const vendorSelect = document.querySelector('sdpi-select[setting="vendor"]');
+
+		// Vendors whose registry capability declares peak/off-peak billing, and their
+		// vendor-published default UTC peak windows. Mirrors the provider registry —
+		// parity with the registry descriptor set is covered by an automated test.
+		const PEAK_PRICING_VENDORS = ["deepseek"];
+		const PEAK_HOURS_DEFAULTS = {
+			"deepseek": "01:00-04:00, 06:00-10:00"
+		};
 
 		function show(el, visible) {
 			el.style.display = visible ? "" : "none";
@@ -123,6 +142,15 @@
 			}
 			for (const item of document.querySelectorAll(".interval")) {
 				show(item, true);
+			}
+			// Peak-pricing controls only for vendors whose registry capability declares
+			// peak/off-peak billing; the hours placeholder carries that vendor's default.
+			const peakCapable = PEAK_PRICING_VENDORS.includes(vendor);
+			for (const item of document.querySelectorAll(".peak-pricing")) {
+				show(item, peakCapable);
+			}
+			if (peakCapable) {
+				document.querySelector('sdpi-textfield[setting="peakHours"]').setAttribute("placeholder", PEAK_HOURS_DEFAULTS[vendor]);
 			}
 		}
 

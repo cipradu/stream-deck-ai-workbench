@@ -469,6 +469,7 @@ export class StreamDeckShell {
         input = buildBalanceRendererInput({
           actionSettings: settings,
           schedulerOutput: output,
+          now: this.now(),
           ...(thresholds === undefined ? {} : { thresholds }),
         });
       } else {

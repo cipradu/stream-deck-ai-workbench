@@ -177,6 +177,14 @@ function balanceBody(input: MetricDisplayRendererInput, now: number): string {
   const isSpendLike = input.displayBasis === "current-period-value" || input.displayBasis === "used-value";
   const marker = isSpendLike ? coverageMarker(input.dataThroughEpochMs, now) : resetMarker(input.resetsAtEpochMs, now);
 
+  // Clock-derived peak-pricing phase (e.g. DeepSeek): informational only, never a
+  // severity tone — amber while inside a peak window, dim off-peak. Renders between
+  // the unit row (y=101) and the marker line (y=128) on fresh and stale keys alike.
+  const phaseRow =
+    input.pricingPhase === undefined
+      ? ""
+      : `<text data-part="pricing-phase" x="72" y="115" text-anchor="middle" font-family="sans-serif" font-size="12" fill="${input.pricingPhase.tone === "amber" ? keyColors.warning : keyColors.dim}">${input.pricingPhase.phase === "peak" ? "peak hrs" : "off-peak"}</text>`;
+
   // Last-checked timestamp sits centered under the vendor name; when the
   // refresh failed, the amber stale badge owns that band instead.
   const checked =
@@ -184,7 +192,7 @@ function balanceBody(input: MetricDisplayRendererInput, now: number): string {
       ? ""
       : `<text data-part="last-checked" x="72" y="43" text-anchor="middle" font-family="sans-serif" font-size="12" fill="${keyColors.dim}">&#10003; ${formatClockTime(input.fetchedAtEpochMs)}</text>`;
 
-  return staleTopRow(input, now) + amount + unitRow + marker + checked;
+  return staleTopRow(input, now) + amount + unitRow + phaseRow + marker + checked;
 }
 
 function statusBody(input: StatusValueRendererInput, now: number): string {

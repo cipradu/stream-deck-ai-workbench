@@ -12,6 +12,7 @@ import {
   packageName,
   parseActionSettings,
   parseGlobalSettings,
+  parsePeakHoursWindows,
   parsePropertyInspectorPayload,
   resolveProviderSettingsRequirements,
   type AppSettingsAdapterPort,
@@ -178,11 +179,13 @@ describe("action settings normalization and privacy", () => {
         expect(Object.keys(result.value).sort()).toEqual([
           "displayPreferences",
           "familyId",
+          "peakPricingEnabled",
           "providerId",
           "refreshIntervalSeconds",
           "schedulerKey",
           "schedulerKeyParts",
         ]);
+        expect(result.value.peakPricingEnabled).toBe(false);
         expect(result.value.schedulerKeyParts).not.toHaveProperty("windowOrPeriod");
         expect(result.value.schedulerKeyParts).not.toHaveProperty("metricVariant");
       }
@@ -250,6 +253,100 @@ describe("action settings normalization and privacy", () => {
       refreshPolicyChanged: true,
       displayOnly: false,
       reasons: ["refresh-interval-changed"],
+    });
+  });
+
+  it("rejects Status payloads carrying the peak-pricing fields", () => {
+    for (const extra of [{ peakPricingEnabled: true }, { peakHours: "01:00-04:00" }]) {
+      expect(parseActionSettings({ familyId: "status", providerId: "openai-api", ...extra })).toMatchObject({
+        ok: false,
+        failure: { diagnostics: { reasonCode: "status-action-settings-forbidden-field" } },
+      });
+    }
+  });
+
+  it("parses a valid peak-hours window list into typed UTC windows", () => {
+    expect(parsePeakHoursWindows("01:00-04:00, 06:00-10:00")).toEqual({
+      kind: "windows",
+      windows: [
+        { startMinutesUtc: 60, endMinutesUtc: 240 },
+        { startMinutesUtc: 360, endMinutesUtc: 600 },
+      ],
+    });
+    expect(parsePeakHoursWindows("22:00-02:00")).toEqual({
+      kind: "windows",
+      windows: [{ startMinutesUtc: 1320, endMinutesUtc: 120 }],
+    });
+  });
+
+  it.each([" 01:00-04:00 ", "01:00 - 04:00", "01:00-04:00 , 06:00-10:00"])(
+    "accepts peak-hours whitespace variant %j",
+    (input) => {
+      expect(parsePeakHoursWindows(input)).toMatchObject({ kind: "windows" });
+    },
+  );
+
+  it.each(["25:00-04:00", "1:00-04:00", "01:60-04:00", "01:00", "abc", "01:00-01:00", "01:00-04:00,"])(
+    "rejects malformed peak-hours input %j",
+    (input) => {
+      expect(parsePeakHoursWindows(input)).toEqual({ kind: "invalid" });
+    },
+  );
+
+  it("treats empty or whitespace-only peak-hours input as the provider default", () => {
+    expect(parsePeakHoursWindows("")).toEqual({ kind: "default" });
+    expect(parsePeakHoursWindows("   ")).toEqual({ kind: "default" });
+  });
+
+  it("normalizes a Balance payload with peak-pricing fields and defaults the toggle", () => {
+    const enabled = unwrapActionSettings({
+      familyId: "balance",
+      providerId: "deepseek",
+      peakPricingEnabled: true,
+      peakHours: "01:00-04:00, 06:00-10:00",
+    });
+    expect(enabled.peakPricingEnabled).toBe(true);
+    expect(enabled.peakHours).toBe("01:00-04:00, 06:00-10:00");
+    expect(enabled.schedulerKey).toBe("balance|deepseek||none|");
+
+    const defaults = unwrapActionSettings({ familyId: "balance", providerId: "deepseek" });
+    expect(defaults.peakPricingEnabled).toBe(false);
+    expect(defaults).not.toHaveProperty("peakHours");
+
+    const emptyWindows = unwrapActionSettings({ familyId: "balance", providerId: "deepseek", peakHours: "   " });
+    expect(emptyWindows).not.toHaveProperty("peakHours");
+  });
+
+  it("fails closed on a malformed Balance peak-hours string", () => {
+    expect(
+      parseActionSettings({ familyId: "balance", providerId: "deepseek", peakPricingEnabled: true, peakHours: "25:00-04:00" }),
+    ).toMatchObject({
+      ok: false,
+      failure: { diagnostics: { reasonCode: "action-settings-peak-hours-invalid" } },
+    });
+  });
+
+  it("classifies peak-pricing changes as display-only", () => {
+    const baseline = unwrapActionSettings({ familyId: "balance", providerId: "deepseek" });
+    const toggleChanged = unwrapActionSettings({ familyId: "balance", providerId: "deepseek", peakPricingEnabled: true });
+    expect(classifyActionSettingsChange(baseline, toggleChanged)).toMatchObject({
+      kind: "display-only",
+      schedulerKeyChanged: false,
+      providerRefetchRequired: false,
+      refreshPolicyChanged: false,
+      displayOnly: true,
+      reasons: ["peak-pricing-changed"],
+    });
+
+    const windowsChanged = unwrapActionSettings({
+      familyId: "balance",
+      providerId: "deepseek",
+      peakPricingEnabled: true,
+      peakHours: "02:00-05:00",
+    });
+    expect(classifyActionSettingsChange(toggleChanged, windowsChanged)).toMatchObject({
+      kind: "display-only",
+      reasons: ["peak-pricing-changed"],
     });
   });
 

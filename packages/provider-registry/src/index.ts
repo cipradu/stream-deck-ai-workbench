@@ -122,6 +122,18 @@ export interface CapabilityCategoryMetric {
 
 export type MetricActionFamilyId = Exclude<ActionFamilyId, "status">;
 
+/**
+ * Peak/off-peak billing declaration for a provider capability. Presence of this
+ * descriptor IS allowlist membership: the display layer derives the current
+ * pricing phase only for capabilities carrying it. `defaultUtcWindows` holds the
+ * vendor-published peak windows as `"HH:MM-HH:MM"` UTC strings (the same grammar
+ * the Balance PI's editable override uses), so a new vendor joins by adding this
+ * descriptor to its capability — no other code changes.
+ */
+export interface PeakPricingDescriptor {
+  readonly defaultUtcWindows: readonly string[];
+}
+
 export interface ProviderCapabilityMetadata<
   F extends MetricActionFamilyId = MetricActionFamilyId,
   K extends MetricKind = MetricKind,
@@ -147,6 +159,7 @@ export interface ProviderCapabilityMetadata<
    */
   readonly categoryMetrics?: Readonly<Partial<Record<UsageWindowId, CapabilityCategoryMetric>>>;
   readonly presentation?: ProviderPresentationMetadata;
+  readonly peakPricing?: PeakPricingDescriptor;
   readonly unavailableReason?: string;
   readonly openDecision?: RegistryOpenDecision;
 }
@@ -499,6 +512,7 @@ function balanceCapability(input: {
   readonly coverageKind: CoverageKind;
   readonly severityStrategy: SeverityStrategy;
   readonly presentation?: ProviderPresentationMetadata;
+  readonly peakPricing?: PeakPricingDescriptor;
   readonly unavailableReason?: string;
 }): ResolvedBalanceProviderCapabilityMetadata {
   return {
@@ -515,6 +529,7 @@ function balanceCapability(input: {
       coverageKind: input.coverageKind,
       severityStrategy: input.severityStrategy,
       ...(input.presentation === undefined ? {} : { presentation: input.presentation }),
+      ...(input.peakPricing === undefined ? {} : { peakPricing: input.peakPricing }),
       ...(input.unavailableReason === undefined ? {} : { unavailableReason: input.unavailableReason }),
     }),
     familyId: "balance",
@@ -825,6 +840,12 @@ export const PROVIDER_REGISTRY = [
         displayBasis: "remaining-value",
         coverageKind: "evergreen",
         severityStrategy: remainingMoneySeverity,
+        // DeepSeek peak/off-peak billing (vendor-published UTC schedule, effective
+        // 2026-08-16): off-peak is half the peak rate. Informational phase indicator
+        // only — the displayed balance value is unaffected.
+        peakPricing: {
+          defaultUtcWindows: ["01:00-04:00", "06:00-10:00"],
+        },
         presentation: {
           credentialLabel: "DeepSeek API Key",
           credentialPlaceholder: "sk-…",

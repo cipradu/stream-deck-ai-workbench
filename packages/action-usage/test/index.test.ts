@@ -37,6 +37,7 @@ function usageSettings(
     providerId,
     refreshIntervalSeconds: REFRESH_INTERVAL_DEFAULT_SECONDS,
     displayPreferences: { usageDisplayMode },
+    peakPricingEnabled: false,
     windowOrPeriod,
     schedulerKeyParts,
     schedulerKey: serializeSchedulerKey(schedulerKeyParts),

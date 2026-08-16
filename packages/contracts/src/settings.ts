@@ -48,3 +48,15 @@ export interface ActionSettingsView {
   readonly credentialProfileRef?: CredentialProfileReference;
   readonly severityProfileRef?: SeverityProfileReference;
 }
+
+/**
+ * One peak-pricing window in UTC wall-clock minutes since 00:00. `start` is
+ * inclusive, `end` is exclusive; `start > end` means the window wraps midnight
+ * (e.g. 22:00-02:00). Shared contract between the settings parser (which
+ * validates the PI string), the registry descriptor defaults, and the display
+ * phase derivation — plain serializable TypeScript only.
+ */
+export interface PeakPricingWindow {
+  readonly startMinutesUtc: number;
+  readonly endMinutesUtc: number;
+}

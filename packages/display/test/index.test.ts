@@ -879,8 +879,158 @@ describe("stale and degraded renderer-safe display inputs", () => {
   });
 });
 
-describe("display boundary guards", () => {
-  it("keeps display source free of SDK, provider adapter, HTTP/runtime/logging, Effect, and fetch imports", async () => {
+describe("peak-pricing phase annotation", () => {
+  const deepseek = registryCapability("deepseek");
+  const deepseekWindows = [
+    { startMinutesUtc: 60, endMinutesUtc: 240 },
+    { startMinutesUtc: 360, endMinutesUtc: 600 },
+  ] as const;
+
+  function peakInput(input: {
+    readonly hour: number;
+    readonly minute?: number;
+    readonly windows?: readonly { startMinutesUtc: number; endMinutesUtc: number }[];
+    readonly capability?: ProviderCapabilityMetadata;
+    readonly peakPricingEnabled?: boolean;
+    readonly now?: number;
+  }) {
+    const capability = input.capability ?? deepseek.capability;
+    return buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:deepseek",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(deepseek, { value: 12.34 }),
+      },
+      capability,
+      ...(input.peakPricingEnabled === undefined ? { peakPricingEnabled: true } : { peakPricingEnabled: input.peakPricingEnabled }),
+      pricingWindows: input.windows ?? deepseekWindows,
+      ...(input.now === undefined ? { now: Date.UTC(2026, 7, 17, input.hour, input.minute ?? 0) } : { now: input.now }),
+    });
+  }
+
+  it.each([
+    [0, 59, "off-peak"],
+    [1, 0, "peak"],
+    [3, 59, "peak"],
+    [4, 0, "off-peak"],
+    [6, 0, "peak"],
+    [9, 59, "peak"],
+    [10, 0, "off-peak"],
+    [12, 0, "off-peak"],
+  ] as const)("at %02d:%02d UTC derives %s", (hour, minute, phase) => {
+    expect(peakInput({ hour, minute }).pricingPhase).toEqual({
+      phase,
+      tone: phase === "peak" ? "amber" : "dim",
+    });
+  });
+
+  it("handles a midnight-wrapping window", () => {
+    const wrapping = [{ startMinutesUtc: 1320, endMinutesUtc: 120 }];
+    expect(peakInput({ hour: 23, minute: 30, windows: wrapping }).pricingPhase?.phase).toBe("peak");
+    expect(peakInput({ hour: 1, minute: 30, windows: wrapping }).pricingPhase?.phase).toBe("peak");
+    expect(peakInput({ hour: 12, minute: 0, windows: wrapping }).pricingPhase?.phase).toBe("off-peak");
+  });
+
+  it("derives no annotation when the toggle is off", () => {
+    expect(peakInput({ hour: 2, peakPricingEnabled: false }).pricingPhase).toBeUndefined();
+  });
+
+  it("derives no annotation for a provider without the registry descriptor, even with the toggle on", () => {
+    const fal = registryCapability("fal");
+    const input = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:fal",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(fal, { value: 4.99 }),
+      },
+      capability: fal.capability,
+      peakPricingEnabled: true,
+      pricingWindows: deepseekWindows,
+      now: Date.UTC(2026, 7, 17, 2, 0),
+    });
+    expect(input.pricingPhase).toBeUndefined();
+  });
+
+  it("derives no annotation for a Usage capability even with peak fields present", () => {
+    const usage = registryCapability("claude-code");
+    const input = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "usage:claude-code",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(usage, { value: 40 }),
+      },
+      capability: usage.capability,
+      peakPricingEnabled: true,
+      pricingWindows: deepseekWindows,
+      now: Date.UTC(2026, 7, 17, 2, 0),
+    });
+    expect(input.pricingPhase).toBeUndefined();
+  });
+
+  it("derives no annotation without the injected clock", () => {
+    const input = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:deepseek",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(deepseek, { value: 12.34 }),
+      },
+      capability: deepseek.capability,
+      peakPricingEnabled: true,
+      pricingWindows: deepseekWindows,
+    });
+    expect(input.pricingPhase).toBeUndefined();
+  });
+
+  it("keeps the annotation on a stale retained-value key and off a degraded key", () => {
+    const stale = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:deepseek",
+        displayState: "stale",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(deepseek, { value: 12.34 }),
+      },
+      capability: deepseek.capability,
+      peakPricingEnabled: true,
+      pricingWindows: deepseekWindows,
+      now: Date.UTC(2026, 7, 17, 2, 0),
+    });
+    expect(stale.freshness).toBe("stale");
+    expect(stale.pricingPhase).toEqual({ phase: "peak", tone: "amber" });
+
+    const degraded = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:deepseek",
+        displayState: "network-failure",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        failure: failure("network-failure"),
+      },
+      capability: deepseek.capability,
+      peakPricingEnabled: true,
+      pricingWindows: deepseekWindows,
+      now: Date.UTC(2026, 7, 17, 2, 0),
+    });
+    expect(degraded.freshness).toBe("degraded");
+    expect(degraded.pricingPhase).toBeUndefined();
+  });
+});
+
+describe("display boundary guards", () => {  it("keeps display source free of SDK, provider adapter, HTTP/runtime/logging, Effect, and fetch imports", async () => {
     const roots = [
       fileURLToPath(new URL("../src", import.meta.url)),
       fileURLToPath(new URL("../test", import.meta.url)),

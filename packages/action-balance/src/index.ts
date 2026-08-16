@@ -9,6 +9,7 @@ import {
   type DisplayUnit,
   type ImplementationStatus,
   type MetricDirection,
+  type PeakPricingWindow,
   type SeverityThresholdSet,
 } from "@ai-workbench/contracts";
 import { buildRendererInput, headerLabelForActionSettings, type MetricDisplayRendererInput } from "@ai-workbench/display";
@@ -19,13 +20,14 @@ import {
   listProviderCapabilitiesForFamily,
   resolveProviderCapability,
   type DisplayBasis,
+  type PeakPricingDescriptor,
   type ProviderCapabilityMetadata,
   type ProviderPresentationMetadata,
   type ResolvedProviderCapabilityMetadata,
   type SourceProofStatus,
 } from "@ai-workbench/provider-registry";
 import type { SchedulerFetch, SchedulerOutput } from "@ai-workbench/scheduler";
-import type { NormalizedActionSettingsView } from "@ai-workbench/settings";
+import { parsePeakHoursWindows, type NormalizedActionSettingsView } from "@ai-workbench/settings";
 
 export const packageName = "@ai-workbench/action-balance" as const;
 
@@ -55,6 +57,8 @@ export interface BalanceProviderOption {
   readonly fetchAllowed: boolean;
   readonly selectionEligible: boolean;
   readonly presentation?: ProviderPresentationMetadata;
+  /** Peak-pricing descriptor when the provider capability declares peak/off-peak billing. */
+  readonly peakPricing?: PeakPricingDescriptor;
   readonly unavailableDisplayState?: DisplayState;
   readonly unavailableReason?: string;
 }
@@ -80,6 +84,8 @@ export interface BuildBalanceRendererInputOptions {
   readonly schedulerOutput: SchedulerOutput;
   readonly thresholds?: SeverityThresholdSet;
   readonly currencyCode?: string;
+  /** Injected wall clock (epoch ms) for clock-derived annotations such as peak pricing. */
+  readonly now?: number;
 }
 
 export function listBalanceProviderOptions(): readonly BalanceProviderOption[] {
@@ -189,6 +195,7 @@ export async function buildSourceGatedBalanceSchedulerOutput(
 export function buildBalanceRendererInput(input: BuildBalanceRendererInputOptions): MetricDisplayRendererInput {
   const capability = capabilityForActionSettings(input.actionSettings);
   const authExpiredHint = capability?.presentation?.authExpiredHint;
+  const pricingWindows = effectivePricingWindows(input.actionSettings, capability);
 
   return buildRendererInput({
     schedulerOutput: input.schedulerOutput,
@@ -204,7 +211,41 @@ export function buildBalanceRendererInput(input: BuildBalanceRendererInputOption
     ...(capability === undefined ? {} : { capability }),
     ...(input.thresholds === undefined ? {} : { thresholds: input.thresholds }),
     ...(input.currencyCode === undefined ? {} : { currencyCode: input.currencyCode }),
+    ...(input.now === undefined ? {} : { now: input.now }),
+    ...(input.actionSettings.peakPricingEnabled === false ? {} : { peakPricingEnabled: input.actionSettings.peakPricingEnabled }),
+    ...(pricingWindows === undefined ? {} : { pricingWindows }),
   });
+}
+
+/**
+ * Effective peak windows for the key: the validated settings override when present,
+ * else the capable provider's registry default. Returns undefined for non-capable
+ * providers or (defensively) unparseable registry defaults — fail-absent means no
+ * annotation, never a crash or a wrong window.
+ */
+function effectivePricingWindows(
+  actionSettings: NormalizedActionSettingsView,
+  capability: ProviderCapabilityMetadata | undefined,
+): readonly PeakPricingWindow[] | undefined {
+  const descriptor = capability?.peakPricing;
+  if (descriptor === undefined) {
+    return undefined;
+  }
+  if (actionSettings.peakHours !== undefined) {
+    const override = parsePeakHoursWindows(actionSettings.peakHours);
+    if (override.kind === "windows") {
+      return override.windows;
+    }
+  }
+  const defaults: PeakPricingWindow[] = [];
+  for (const windowString of descriptor.defaultUtcWindows) {
+    const parsed = parsePeakHoursWindows(windowString);
+    if (parsed.kind !== "windows") {
+      return undefined;
+    }
+    defaults.push(...parsed.windows);
+  }
+  return defaults;
 }
 
 function balanceProviderOption(
@@ -232,6 +273,7 @@ function balanceProviderOption(
     fetchAllowed: status.fetchAllowed && adapterBindingAvailable,
     selectionEligible: status.selectionEligible && adapterBindingAvailable,
     ...(capability.presentation === undefined ? {} : { presentation: capability.presentation }),
+    ...(capability.peakPricing === undefined ? {} : { peakPricing: capability.peakPricing }),
     ...(status.unavailableDisplayState === undefined ? {} : { unavailableDisplayState: status.unavailableDisplayState }),
     ...(capability.unavailableReason === undefined ? {} : { unavailableReason: capability.unavailableReason }),
   };

@@ -572,6 +572,18 @@ describe("Balance metric truth matrix", () => {
     expectRequiresUserProfileSeverity("elevenlabs");
     expectRequiresUserProfileSeverity("jina");
   });
+
+  it("declares DeepSeek peak pricing with the vendor-published UTC default windows", () => {
+    const capability = metricCapability("deepseek");
+    expect(capability?.peakPricing).toEqual({
+      defaultUtcWindows: ["01:00-04:00", "06:00-10:00"],
+    });
+  });
+
+  it("keeps every other provider capability free of the peak-pricing descriptor", () => {
+    const withPeakPricing = allMetricCapabilities().filter((capability) => capability.peakPricing !== undefined);
+    expect(withPeakPricing.map((capability) => capability.providerId)).toEqual(["deepseek"]);
+  });
 });
 
 describe("registry-derived provider selection and onboarding", () => {

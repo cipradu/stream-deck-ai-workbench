@@ -12,7 +12,7 @@ A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, accoun
 
 ## Current status
 
-- **Plugin version:** `0.2.0.12`
+- **Plugin version:** `0.2.0.13`
 - **Actions:** Usage, Balance, and Status
 - **Implemented catalog:** 5 Usage providers, 12 Balance providers, and 4 Status providers
 - **Distribution:** this repository's install path is a source build linked into Stream Deck
@@ -61,6 +61,8 @@ Each key polls through the shared scheduler and renders a compact SVG. Usage and
 
 Exact fields come from each vendor's own billing/usage API; some vendors expose only spend/usage history rather than a remaining balance, which is why those keys show spend.
 
+**DeepSeek peak/off-peak pricing:** DeepSeek bills API usage at full rate during its published UTC peak windows and half rate otherwise. A DeepSeek Balance key can show the current phase — amber `peak hrs` or dim `off-peak` under the amount — via the `Peak pricing` toggle in the Balance Property Inspector. The `Peak hours (UTC)` field accepts a comma-separated override such as `01:00-04:00, 06:00-10:00` (the vendor-published default). The indicator is informational only: it never changes the displayed balance or its color.
+
 ### Status
 
 | Provider | What the key shows |
@@ -79,9 +81,9 @@ Status uses each provider's public no-credential status source. It counts only i
 - **Claude Code Credits** (extra-usage spend) renders the % of your monthly cap consumed with a `$used / $cap` line; when the feature is off or out of credits it shows a status word instead of a misleading gauge.
 - **Kimi Code Extra Usage** renders only the amount spent, such as `$12.50`; it is not a percentage and has no invented cap. When Extra Usage is disabled, the key renders **Off**.
 - **Codex Resets** renders the reset‑credit count with a countdown to the earliest expiry.
-- **Status keys** render the active-incident count prominently. Anthropic, Moonshot AI, and MiniMax color comes from highest active incident impact. OpenAI color is the worse independently mapped value of highest active incident impact and aggregate provider status. Status color does not use user thresholds.
+- **Status keys** render the active-incident count prominently with an `incidents` unit label underneath. Anthropic, Moonshot AI, and MiniMax color comes from highest active incident impact. OpenAI color is the worse independently mapped value of highest active incident impact and aggregate provider status. Status color does not use user thresholds.
 - **Severity colors** are **direction-aware**: usage, spend, and used-time keys move **amber → red** as the value rises; remaining balances, credits, tokens, and characters move amber → red as the value falls. Percentage windows default to amber at 80% and red at 90%. Absolute-value overrides use the displayed unit: dollars for Claude/Kimi extra usage, credits for Codex Credits, and days of runway for Codex Resets.
-- Pressing a configured key requests an immediate refresh under the shared backoff policy. Usage and Balance polling defaults to 600 seconds and accepts values from 60 to 3600 seconds. Status has no refresh setting: it uses a fixed 600-second healthy cadence, becomes age-stale after 20 minutes, and expires retained stale data after 24 hours.
+- Pressing a configured key requests an immediate refresh under the shared backoff policy. All three action families accept a **refresh interval** of 60 to 3600 seconds (default 600). A key becomes age-stale after twice its refresh interval (20 minutes at the default) and expires retained stale data after 24 hours.
 
 ## Requirements
 
@@ -131,7 +133,7 @@ Usage and Balance keys are configured from their **Property Inspector**:
 5. Choose **Used %** or **Remaining %** for percentage windows.
 6. Optionally set **amber / red thresholds** where the selected metric supports them, and set the **refresh interval** in seconds.
 
-Status has a Provider-only Property Inspector. Add **Status** to a key and choose Anthropic, OpenAI, Moonshot AI, or MiniMax; first placement defaults to Anthropic. Status has no credential, threshold, window, component filter, or refresh control.
+Status keys are configured from their own **Property Inspector**: add **Status** to a key, choose Anthropic, OpenAI, Moonshot AI, or MiniMax (first placement defaults to Anthropic), and optionally set the **refresh interval** in seconds, like the other actions. Status has no credential, threshold, window, or component filter.
 
 ## Credentials & security
 
@@ -139,7 +141,7 @@ Status has a Provider-only Property Inspector. Add **Status** to a key and choos
 - **Claude Code and Kimi Code have bounded expiry recovery.** When a locally known token is expired, or the provider rejects it as expired, the plugin runs the provider's official CLI once in a temporary isolated directory, waits up to 60 seconds, rereads the credential, and retries the request once. The CLI may update its own credential store. If recovery fails, the key shows an authentication-required state and the next normal poll may try again.
 - **Codex does not launch a recovery command.** It rereads the locally managed credential once after an unauthorized response; running or reopening Codex remains the way to renew that login.
 - **API keys** (z.ai, MiniMax, and every Balance vendor) are entered in the Property Inspector and stored in Stream Deck **global settings**, not per-action settings that can be exported with a profile.
-- **Status needs no credentials.** Its provider sources are public, and Status settings contain only the selected provider.
+- **Status needs no credentials.** Its provider sources are public, and Status settings contain only the selected provider and its refresh interval.
 - **Some Balance vendors require privileged keys.** For example, reading Anthropic organization spend requires an **admin API key**, which carries broad organization privileges. Only provide keys whose scope you are comfortable with, and prefer the narrowest key a vendor offers.
 - **Moonshot and Kimi Code use different credentials.** The Moonshot Balance provider requires an open-platform API key; it does not accept the Kimi Code coding credential.
 - **Bring your own keys, and never commit them.** Secrets, tokens, account identifiers, and raw vendor responses are kept out of rendered output and sanitized diagnostics by design.

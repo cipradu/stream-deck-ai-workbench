@@ -5,6 +5,7 @@ import {
   type ErrorCategory,
   type MetricDirection,
   type MetricSnapshot,
+  type PeakPricingWindow,
   type ProviderStatusIndicator,
   type RendererInput,
   type RetryClass,
@@ -217,6 +218,19 @@ export interface MetricDisplayRendererInput extends RendererInput, DisplayRender
   readonly usageWindow?: UsageWindowId;
   /** True when the snapshot came from a read-only local fallback source; renderers keep the old stale-badge honesty. */
   readonly sourceFallback?: boolean;
+  /**
+   * Clock-derived peak-pricing phase annotation (DeepSeek-style peak/off-peak billing).
+   * Present only when the provider's registry capability declares peak pricing AND the
+   * key's toggle is on; the renderer draws the phase row with the given tone. Clock
+   * truth, not provider truth — it is independent of snapshot freshness.
+   */
+  readonly pricingPhase?: PricingPhaseAnnotation;
+}
+
+/** Peak-pricing phase annotation: the phase word plus its non-severity tone (amber = peak costs more, dim = off-peak). */
+export interface PricingPhaseAnnotation {
+  readonly phase: "peak" | "off-peak";
+  readonly tone: "amber" | "dim";
 }
 
 export interface StatusDisplayModel {
@@ -275,6 +289,15 @@ export interface BuildRendererInputOptions {
    */
   readonly severityStrategy?: SeverityStrategy;
   readonly currencyCode?: string;
+  /**
+   * Injected wall clock (epoch ms) for clock-derived annotations. Absent means
+   * no clock-derived annotation is produced — display never synthesizes a clock.
+   */
+  readonly now?: number;
+  /** Peak-pricing toggle from action settings; effective only with a capable provider. */
+  readonly peakPricingEnabled?: boolean;
+  /** Effective peak windows (settings override already resolved against the registry default). */
+  readonly pricingWindows?: readonly PeakPricingWindow[];
 }
 
 export interface BuildStatusRendererInputOptions {
@@ -542,6 +565,12 @@ export function buildRendererInput(input: BuildRendererInputOptions): MetricDisp
   const failureIndicator =
     isStale && input.schedulerOutput.staleReason === "refresh-failed" ? staleFailureIndicatorFromContext(failureContext) : undefined;
   const authExpiredHint = input.authExpiredHint ?? capability?.presentation?.authExpiredHint;
+  const pricingPhase = derivePricingPhase({
+    capability,
+    peakPricingEnabled: input.peakPricingEnabled,
+    pricingWindows: input.pricingWindows,
+    now: input.now,
+  });
 
   return {
     valueText: value.valueText,
@@ -557,6 +586,7 @@ export function buildRendererInput(input: BuildRendererInputOptions): MetricDisp
     displayBasis: value.displayBasis,
     displayValue: value.displayValue,
     severityBasisValue: value.severityBasisValue,
+    ...(pricingPhase === undefined ? {} : { pricingPhase }),
     ...(value.unitRowText === undefined ? {} : { unitRowText: value.unitRowText }),
     ...(value.coverageMarker === undefined ? {} : { coverageMarker: value.coverageMarker }),
     ...(value.secondaryLine === undefined ? {} : { secondaryLine: value.secondaryLine }),
@@ -578,8 +608,39 @@ export function buildRendererInput(input: BuildRendererInputOptions): MetricDisp
   };
 }
 
-export function buildStatusRendererInput(input: BuildStatusRendererInputOptions): StatusDisplayRendererInput {
-  const snapshot = input.schedulerOutput.snapshot;
+/**
+ * Derives the peak-pricing phase annotation under the display gate: the provider's
+ * registry capability must declare peak pricing, the key's toggle must be on, and the
+ * injected clock plus effective windows must be present. Window start is inclusive,
+ * end is exclusive (spec D-05); windows with start > end wrap midnight UTC. Any gate
+ * miss yields no annotation — never a guess.
+ */
+function derivePricingPhase(input: {
+  readonly capability?: ProviderCapabilityMetadata | undefined;
+  readonly peakPricingEnabled?: boolean | undefined;
+  readonly pricingWindows?: readonly PeakPricingWindow[] | undefined;
+  readonly now?: number | undefined;
+}): PricingPhaseAnnotation | undefined {
+  if (
+    input.capability?.peakPricing === undefined ||
+    input.peakPricingEnabled !== true ||
+    input.pricingWindows === undefined ||
+    input.pricingWindows.length === 0 ||
+    input.now === undefined
+  ) {
+    return undefined;
+  }
+
+  const minutesUtc = Math.floor(((input.now % 86_400_000) + 86_400_000) % 86_400_000 / 60_000);
+  const inPeak = input.pricingWindows.some((window) =>
+    window.startMinutesUtc < window.endMinutesUtc
+      ? minutesUtc >= window.startMinutesUtc && minutesUtc < window.endMinutesUtc
+      : minutesUtc >= window.startMinutesUtc || minutesUtc < window.endMinutesUtc,
+  );
+  return inPeak ? { phase: "peak", tone: "amber" } : { phase: "off-peak", tone: "dim" };
+}
+
+export function buildStatusRendererInput(input: BuildStatusRendererInputOptions): StatusDisplayRendererInput {  const snapshot = input.schedulerOutput.snapshot;
   if (snapshot === undefined) {
     return degradedStatusRendererInput(input.schedulerOutput, {
       ...(input.headerLabel === undefined ? {} : { headerLabel: input.headerLabel }),
