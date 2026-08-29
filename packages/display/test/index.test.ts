@@ -303,6 +303,29 @@ describe("direction-aware severity policy", () => {
     expect(evaluateSeverity({ capability, value }).severity).toBe(expectedSeverity);
   });
 
+  it("keeps a negative OpenRouter remaining-credit snapshot unclamped through display assembly and lower-bound severity", () => {
+    const openrouter = registryCapability("openrouter");
+    const input = buildRendererInput({
+      schedulerOutput: {
+        schedulerKey: "balance:openrouter",
+        displayState: "fresh",
+        refreshIntervalSeconds: 600,
+        activeRefCount: 1,
+        inFlight: false,
+        snapshot: snapshotFor(openrouter, { value: -74.5 }),
+      },
+      capability: openrouter.capability,
+    });
+
+    expect(input).toMatchObject({
+      valueText: "-$74.50",
+      displayValue: -74.5,
+      severityBasisValue: -74.5,
+      severity: "critical",
+      rendererSeverityState: "critical",
+    });
+  });
+
   it("computes lower-bound remaining percent from the registry default strategy reference", () => {
     const remainingPercentCapability: ProviderCapabilityMetadata = {
       actionFamilyId: "usage",

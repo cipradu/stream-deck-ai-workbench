@@ -1,6 +1,6 @@
 # AI Workbench
 
-A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, account **balances**, and public provider **incident status** on your Stream Deck keys. The current catalog implements plan usage for five AI coding tools, balance/spend/credit/token/character/used-time metrics for twelve AI API vendors, and active-incident status for four providers.
+A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, account **balances**, and public provider **incident status** on your Stream Deck keys. The current catalog implements plan usage for five AI coding tools, balance/spend/credit/token/character/used-time metrics for thirteen AI API vendors, and active-incident status for four providers.
 
 ![AI Workbench on a Stream Deck XL](assets/preview.jpg)
 
@@ -12,9 +12,9 @@ A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, accoun
 
 ## Current status
 
-- **Plugin version:** `0.2.0.13`
+- **Plugin version:** `0.2.0.14`
 - **Actions:** Usage, Balance, and Status
-- **Implemented catalog:** 5 Usage providers, 12 Balance providers, and 4 Status providers
+- **Implemented catalog:** 5 Usage providers, 13 Balance providers, and 4 Status providers
 - **Distribution:** this repository's install path is a source build linked into Stream Deck
 - **Platform:** macOS 14+, Stream Deck 7.1+, and Stream Deck's bundled Node 24 runtime
 
@@ -58,6 +58,7 @@ Each key polls through the shared scheduler and renders a compact SVG. Usage and
 | **ElevenLabs** | remaining characters | characters |
 | **RunPod** | current‑period spend | USD |
 | **Speechmatics** | used audio time | hours |
+| **OpenRouter** | remaining credit | USD |
 
 Exact fields come from each vendor's own billing/usage API; some vendors expose only spend/usage history rather than a remaining balance, which is why those keys show spend.
 
@@ -142,7 +143,7 @@ Status keys are configured from their own **Property Inspector**: add **Status**
 - **Codex does not launch a recovery command.** It rereads the locally managed credential once after an unauthorized response; running or reopening Codex remains the way to renew that login.
 - **API keys** (z.ai, MiniMax, and every Balance vendor) are entered in the Property Inspector and stored in Stream Deck **global settings**, not per-action settings that can be exported with a profile.
 - **Status needs no credentials.** Its provider sources are public, and Status settings contain only the selected provider and its refresh interval.
-- **Some Balance vendors require privileged keys.** For example, reading Anthropic organization spend requires an **admin API key**, which carries broad organization privileges. Only provide keys whose scope you are comfortable with, and prefer the narrowest key a vendor offers.
+- **Some Balance vendors require privileged keys.** For example, reading Anthropic organization spend requires an **admin API key**, and OpenRouter credit totals require a **Management API key** (created under OpenRouter Settings → Provisioning API Keys; a regular inference key is rejected). These keys carry broad account privileges. Only provide keys whose scope you are comfortable with, and prefer the narrowest key a vendor offers.
 - **Moonshot and Kimi Code use different credentials.** The Moonshot Balance provider requires an open-platform API key; it does not accept the Kimi Code coding credential.
 - **Bring your own keys, and never commit them.** Secrets, tokens, account identifiers, and raw vendor responses are kept out of rendered output and sanitized diagnostics by design.
 

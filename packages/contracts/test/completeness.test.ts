@@ -48,7 +48,7 @@ describe("provider identifiers", () => {
     expect(USAGE_PROVIDER_IDS).toHaveLength(5);
   });
 
-  it("contains exactly the twelve balance provider ids", () => {
+  it("contains exactly the thirteen balance provider ids", () => {
     expect(asSortedSet(BALANCE_PROVIDER_IDS)).toEqual([
       "anthropic-api",
       "deepgram",
@@ -59,11 +59,12 @@ describe("provider identifiers", () => {
       "jina",
       "moonshot",
       "openai-api",
+      "openrouter",
       "runpod",
       "speechmatics",
       "tavily",
     ]);
-    expect(BALANCE_PROVIDER_IDS).toHaveLength(12);
+    expect(BALANCE_PROVIDER_IDS).toHaveLength(13);
   });
 
   it("reuses exactly four existing provider ids for Status", () => {
@@ -72,10 +73,10 @@ describe("provider identifiers", () => {
     expect(new Set(STATUS_PROVIDER_IDS).size).toBe(STATUS_PROVIDER_IDS.length);
   });
 
-  it("exposes all seventeen catalog providers with no duplicates", () => {
+  it("exposes all eighteen catalog providers with no duplicates", () => {
     expect(asSortedSet(PROVIDER_IDS)).toEqual(asSortedSet([...USAGE_PROVIDER_IDS, ...BALANCE_PROVIDER_IDS]));
-    expect(PROVIDER_IDS).toHaveLength(17);
-    expect(new Set(PROVIDER_IDS).size).toBe(17);
+    expect(PROVIDER_IDS).toHaveLength(18);
+    expect(new Set(PROVIDER_IDS).size).toBe(18);
   });
 });
 

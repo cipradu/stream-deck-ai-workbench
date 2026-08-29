@@ -745,6 +745,7 @@ describe("provider logo assets", () => {
     const files = (await readdir(fileURLToPath(logosDirUrl))).filter((name) => name.endsWith(".svg"));
     expect(files).toContain("minimax.svg");
     expect(files).toContain("kimi.svg");
+    expect(files).toContain("openrouter.svg");
     for (const file of files) {
       const prepared = prepareLogoSvg(await readFile(fileURLToPath(new URL(file, logosDirUrl)), "utf8"));
       expect({ file, renderable: prepared !== undefined && prepared.body.length > 0 }).toEqual({ file, renderable: true });
@@ -961,6 +962,7 @@ describe("Property Inspector registry data and static UI", () => {
       elevenlabs: "elevenlabs",
       runpod: "runpod",
       speechmatics: "speechmatics",
+      openrouter: "openrouter",
     } as const;
 
     const options = listProviderOptionsForFamily("balance");
@@ -1554,6 +1556,34 @@ describe("settings boundary and PI writes", () => {
     }) as { credentialProfiles: readonly { credentialMaterial?: { value?: string } }[] };
     expect(existing.credentialProfiles).toHaveLength(1);
     expect(existing.credentialProfiles[0]?.credentialMaterial?.value).toBe("canonical-zai-key-fixture");
+  });
+
+  it("maps the OpenRouter legacy Balance field to an admin-class credential profile", () => {
+    expect(parseActionSettingsForFamily("balance", { vendor: "openrouter" })).toMatchObject({
+      ok: true,
+      value: {
+        providerId: "openrouter",
+        credentialProfileRef: {
+          kind: "credential-profile",
+          credentialClass: "admin-api-credential",
+          profileId: "profile:balance:openrouter:admin-api-credential",
+        },
+      },
+    });
+
+    const augmented = withLegacyCredentialProfiles({
+      balanceApiKeys: { openrouter: "fixture-openrouter-management-key" },
+    }) as { credentialProfiles: readonly Record<string, unknown>[] };
+    expect(augmented.credentialProfiles).toContainEqual({
+      profileId: "profile:balance:openrouter:admin-api-credential",
+      actionFamilyId: "balance",
+      providerId: "openrouter",
+      credentialClass: "admin-api-credential",
+      credentialMaterial: {
+        kind: "inline-secret",
+        value: "fixture-openrouter-management-key",
+      },
+    });
   });
 
   it("rejects secret-bearing action settings on receipt and never activates a fetch for them", async () => {

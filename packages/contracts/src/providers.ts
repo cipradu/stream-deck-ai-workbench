@@ -22,6 +22,7 @@ export const BALANCE_PROVIDER_IDS = [
   "elevenlabs",
   "runpod",
   "speechmatics",
+  "openrouter",
 ] as const;
 export type BalanceProviderId = (typeof BALANCE_PROVIDER_IDS)[number];
 

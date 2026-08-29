@@ -62,6 +62,7 @@ import { falBalanceProviderModule } from "../src/providers/balance/fal/index.js"
 import { jinaBalanceProviderModule } from "../src/providers/balance/jina/index.js";
 import { moonshotBalanceProviderModule } from "../src/providers/balance/moonshot/index.js";
 import { openAiApiBalanceProviderModule } from "../src/providers/balance/openai-api/index.js";
+import { openrouterBalanceProviderModule } from "../src/providers/balance/openrouter/index.js";
 import { runpodBalanceProviderModule } from "../src/providers/balance/runpod/index.js";
 import { speechmaticsBalanceProviderModule } from "../src/providers/balance/speechmatics/index.js";
 import { tavilyBalanceProviderModule } from "../src/providers/balance/tavily/index.js";
@@ -293,9 +294,10 @@ describe("provider request-helper census", () => {
       ["providers/balance/fal/index.ts", 1],
       ["providers/balance/exa/index.ts", 2],
       ["providers/balance/moonshot/index.ts", 1],
+      ["providers/balance/openrouter/index.ts", 1],
     ]);
 
-    expect([...expectedGovernedCalls.values()].reduce((total, count) => total + count, 0)).toBe(20);
+    expect([...expectedGovernedCalls.values()].reduce((total, count) => total + count, 0)).toBe(21);
     expect(directProviderHelperCallLocations()).toEqual([]);
 
     for (const [modulePath, expectedCount] of expectedGovernedCalls) {
@@ -3425,6 +3427,7 @@ describe("provider capability module structure", () => {
       "jina",
       "moonshot",
       "openai-api",
+      "openrouter",
       "runpod",
       "speechmatics",
       "tavily",
@@ -3782,6 +3785,47 @@ describe("docs-shaped Balance response normalization", () => {
       value: 8.5,
       currencyCode: "USD",
     });
+  });
+
+  it("derives OpenRouter remaining credit from complete numeric fields without clamping or retaining unknown fields", () => {
+    for (const response of [
+      { data: { total_credits: 250, total_usage: 175.5 } },
+      { data: { total_credits: "250", total_usage: "175.5" } },
+      {
+        data: { total_credits: 250, total_usage: 175.5, ignored_vendor_field: "ignored" },
+        ignored_root_field: true,
+      },
+    ]) {
+      expectNormalizedSnapshot({
+        providerId: "openrouter",
+        response,
+        metricKind: "remaining-balance",
+        coverageKind: "evergreen",
+        value: 74.5,
+      });
+    }
+
+    expectNormalizedSnapshot({
+      providerId: "openrouter",
+      response: { data: { total_credits: 175.5, total_usage: 250 } },
+      metricKind: "remaining-balance",
+      coverageKind: "evergreen",
+      value: -74.5,
+    });
+
+    const missingUsage = normalize("openrouter", { data: { total_credits: 250 } });
+    expect(missingUsage).toMatchObject({
+      ok: false,
+      failure: {
+        category: "validation-drift",
+        displayState: "validation-drift",
+        diagnostics: {
+          boundary: "provider-adapters-balance-openrouter",
+          reasonCode: "balance-openrouter-response-schema",
+        },
+      },
+    });
+    expect(missingUsage).not.toHaveProperty("snapshot");
   });
 
   it("normalizes OpenAI and Exa docs-shaped cost fields as upper-bound month-to-date spend snapshots", () => {
@@ -4190,6 +4234,17 @@ const migratedJsonCases = [
     headerValue: `Bearer ${MIGRATED_SECRET}`,
   },
   {
+    providerId: "openrouter" as const,
+    module: openrouterBalanceProviderModule,
+    baseUrl: "https://openrouter.ai",
+    body: { data: { total_credits: 250, total_usage: 175.5 } },
+    value: 74.5,
+    metricKind: "remaining-balance",
+    endpointContains: "/api/v1/credits",
+    headerName: "authorization",
+    headerValue: `Bearer ${MIGRATED_SECRET}`,
+  },
+  {
     providerId: "tavily" as const,
     module: tavilyBalanceProviderModule,
     baseUrl: "https://api.tavily.com",
@@ -4248,6 +4303,41 @@ describe("migrated single-request Balance adapters", () => {
       expect(String(captured[0]?.url)).toContain(endpointContains);
     },
   );
+
+  it("maps OpenRouter Management-key scope rejection and rate limiting through the central failure contract", async () => {
+    const rejectedScope = await migratedEffectSourceFetch(
+      openrouterBalanceProviderModule,
+      "openrouter",
+      "https://openrouter.ai",
+      [],
+      respondJson(403, { error: "insufficient scope" }),
+    )(balanceRequest("openrouter"));
+    expect(rejectedScope).toMatchObject({
+      ok: false,
+      failure: {
+        category: "insufficient-credential-scope",
+        displayState: "invalid-credentials",
+        retryClass: "credential-settings-refresh",
+      },
+    });
+
+    const rateLimited = await migratedEffectSourceFetch(
+      openrouterBalanceProviderModule,
+      "openrouter",
+      "https://openrouter.ai",
+      [],
+      respondJson(429, { error: "rate limited" }, { "retry-after": "30" }),
+    )(balanceRequest("openrouter"));
+    expect(rateLimited).toMatchObject({
+      ok: false,
+      retry: { retryAfterSeconds: 30 },
+      failure: {
+        category: "rate-limited",
+        displayState: "rate-limited",
+        retryClass: "rate-limit-backoff",
+      },
+    });
+  });
 
   it.each(migratedJsonCases)(
     "$providerId carries the raw key via the single Redacted.value unwrap and never leaks it on failure",

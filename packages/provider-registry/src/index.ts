@@ -1050,6 +1050,31 @@ export const PROVIDER_REGISTRY = [
       }),
     ],
   },
+  {
+    providerId: "openrouter",
+    productLabel: "OpenRouter",
+    capabilities: [
+      balanceCapability({
+        adapterBindingId: "balance.openrouter",
+        implementationStatus: "implemented",
+        sourceProofStatus: "probeAccepted",
+        credentialClasses: adminApiCredential,
+        requiredSettings: credentialSettings,
+        metricKind: "remaining-balance",
+        displayBasis: "remaining-value",
+        coverageKind: "evergreen",
+        severityStrategy: remainingMoneySeverity,
+        presentation: {
+          credentialLabel: "OpenRouter Management Key",
+          credentialPlaceholder: "paste your OpenRouter Management key",
+          guidance:
+            "OpenRouter Management key from openrouter.ai Settings → Provisioning API Keys. A regular inference key is rejected.",
+          unitShortLabel: "USD",
+          authExpiredHint: "needs management key",
+        },
+      }),
+    ],
+  },
 ] as const satisfies readonly ProviderRegistryEntry<ProviderId, ActionFamilyId>[];
 
 export interface ProviderAdapterBinding {

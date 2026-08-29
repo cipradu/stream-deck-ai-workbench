@@ -243,7 +243,7 @@ describe("provider request governor production adapter route", () => {
     }
     expect(governor.events.filter((event) => event === "permit:claude-code")).toHaveLength(2);
     expect(governor.events.filter((event) => event === "permit:codex")).toHaveLength(2);
-    expect(governor.settlements).toHaveLength(16);
+    expect(governor.settlements).toHaveLength(17);
   });
 
   it("fails closed at the source gate when the runtime capability is absent", async () => {

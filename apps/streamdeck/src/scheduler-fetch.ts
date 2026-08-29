@@ -56,6 +56,7 @@ const BALANCE_PROVIDER_BASE_URLS = {
   jina: "https://r.jina.ai",
   moonshot: "https://api.moonshot.ai",
   deepseek: "https://api.deepseek.com",
+  openrouter: "https://openrouter.ai",
 } as const satisfies Readonly<Record<BalanceProviderId, string>>;
 
 const USAGE_PROVIDER_BASE_URLS = {

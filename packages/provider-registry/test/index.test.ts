@@ -129,6 +129,7 @@ describe("provider registry catalog completeness", () => {
 
   it("returns undefined for unsupported provider-family combinations without falling back to another capability", () => {
     expect(resolveProviderCapability("deepseek", "status")).toBeUndefined();
+    expect(resolveProviderCapability("openrouter", "status")).toBeUndefined();
     expect(resolveProviderCapability("zai-coding-plan", "status")).toBeUndefined();
     expect(resolveProviderCapability("moonshot", "usage")).toBeUndefined();
     expect(resolveProviderCapability("minimax", "balance")).toBeUndefined();
@@ -522,6 +523,7 @@ describe("Balance metric truth matrix", () => {
       exa: ["current-month-spend", "month-to-date", "probeAccepted"],
       moonshot: ["remaining-balance", "evergreen", "probeAccepted"],
       deepseek: ["remaining-balance", "evergreen", "probeAccepted"],
+      openrouter: ["remaining-balance", "evergreen", "probeAccepted"],
     } as const;
 
     for (const [providerId, [metricKind, coverageKind, sourceProofStatus]] of Object.entries(expected)) {
@@ -532,6 +534,42 @@ describe("Balance metric truth matrix", () => {
       expect(capability?.sourceProofStatus).toBe(sourceProofStatus);
       expect(capability?.implementationStatus).toBe("implemented");
     }
+  });
+
+  it("models OpenRouter remaining credit with Management-key metadata and no Status or peak-pricing capability", () => {
+    const entry = findProviderEntry("openrouter");
+    expect(entry).toMatchObject({
+      providerId: "openrouter",
+      productLabel: "OpenRouter",
+    });
+    expect(entry?.capabilities).toHaveLength(1);
+    expect(metricCapability("openrouter")).toMatchObject({
+      actionFamilyId: "balance",
+      adapterBindingId: "balance.openrouter",
+      implementationStatus: "implemented",
+      sourceProofStatus: "probeAccepted",
+      credentialClasses: ["admin-api-credential"],
+      requiredSettings: ["credential-profile", "severity-profile-optional", "display-preferences-optional"],
+      metricKind: "remaining-balance",
+      metricDirection: "lower-bound",
+      displayUnit: "money",
+      displayBasis: "remaining-value",
+      coverageKind: "evergreen",
+      severityStrategy: {
+        kind: "registry-default",
+        reference: "lower-bound-remaining-money-default",
+      },
+      presentation: {
+        credentialLabel: "OpenRouter Management Key",
+        credentialPlaceholder: "paste your OpenRouter Management key",
+        guidance:
+          "OpenRouter Management key from openrouter.ai Settings → Provisioning API Keys. A regular inference key is rejected.",
+        unitShortLabel: "USD",
+        authExpiredHint: "needs management key",
+      },
+    });
+    expect(metricCapability("openrouter")).not.toHaveProperty("peakPricing");
+    expect(resolveProviderCapability("openrouter", "status")).toBeUndefined();
   });
 
   it("implements Anthropic and Tavily with their researched Balance metric truth", () => {

@@ -447,6 +447,7 @@ const LOGO_FILE_BY_PROVIDER: Readonly<Record<string, string>> = {
   elevenlabs: "elevenlabs",
   runpod: "runpod",
   speechmatics: "speechmatics",
+  openrouter: "openrouter",
 };
 
 const logoCache = new Map<string, PreparedLogo | undefined>();

@@ -64,6 +64,7 @@ const LEGACY_BALANCE_PROVIDER_IDS = {
   jina: "jina",
   moonshot: "moonshot",
   deepseek: "deepseek",
+  openrouter: "openrouter",
 } as const satisfies Readonly<Record<string, ProviderId>>;
 const LEGACY_BALANCE_PROVIDER_LOOKUP: Readonly<Record<string, ProviderId>> = LEGACY_BALANCE_PROVIDER_IDS;
 
@@ -115,7 +116,7 @@ const LEGACY_USAGE_GLOBAL_KEYS = {
   minimaxApiKey: "minimax",
 } as const satisfies Readonly<Record<string, ProviderId>>;
 
-const ADMIN_CREDENTIAL_PROVIDER_IDS: ReadonlySet<string> = new Set(["anthropic-api", "openai-api"]);
+const ADMIN_CREDENTIAL_PROVIDER_IDS: ReadonlySet<string> = new Set(["anthropic-api", "openai-api", "openrouter"]);
 
 function canonicalCredentialClassFor(familyId: ActionFamilyId, providerId: ProviderId): CredentialClass {
   void familyId;

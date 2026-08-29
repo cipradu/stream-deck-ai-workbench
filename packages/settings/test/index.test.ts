@@ -799,6 +799,56 @@ describe("global settings safe views and registry-derived requirements", () => {
       expect(result.failure.category).toBe("settings-validation-failure");
     }
   });
+
+  it("accepts OpenRouter Management-key profiles and rejects the wrong credential class", () => {
+    const correctProfile = {
+      profileId: "profile:balance:openrouter:admin-api-credential",
+      actionFamilyId: "balance",
+      providerId: "openrouter",
+      credentialClass: "admin-api-credential",
+      credentialMaterial: {
+        kind: "inline-secret",
+        value: RAW_NEEDLES.credentialValueA,
+      },
+    } as const;
+    const accepted = parseGlobalSettings({ credentialProfiles: [correctProfile] });
+    expect(accepted).toMatchObject({
+      ok: true,
+      value: {
+        credentialProfiles: [
+          {
+            profileId: "profile:balance:openrouter:admin-api-credential",
+            providerId: "openrouter",
+            actionFamilyId: "balance",
+            credentialClass: "admin-api-credential",
+            credentialPresent: true,
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(accepted)).not.toContain(RAW_NEEDLES.credentialValueA);
+
+    const rejected = parseGlobalSettings({
+      credentialProfiles: [
+        {
+          ...correctProfile,
+          profileId: "profile:balance:openrouter:plugin-api-key",
+          credentialClass: "plugin-api-key",
+          credentialMaterial: {
+            kind: "inline-secret",
+            value: RAW_NEEDLES.credentialValueB,
+          },
+        },
+      ],
+    });
+    expect(rejected).toMatchObject({
+      ok: false,
+      failure: {
+        category: "settings-validation-failure",
+      },
+    });
+    expect(JSON.stringify(rejected)).not.toContain(RAW_NEEDLES.credentialValueB);
+  });
 });
 
 describe("Property Inspector payload parsing", () => {

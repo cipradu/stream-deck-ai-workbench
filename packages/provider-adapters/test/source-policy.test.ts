@@ -1316,8 +1316,8 @@ describe("provider adapter source policy", () => {
       ...inspectStatusSourcePolicy(actionStatusInventory.program, actionStatusInventory.sourcePaths),
     ];
 
-    expect(providerModulePaths).toHaveLength(21);
-    expect(inventory.sourcePaths).toHaveLength(36);
+    expect(providerModulePaths).toHaveLength(22);
+    expect(inventory.sourcePaths).toHaveLength(37);
     expect(statusProductionPaths).toEqual(expectedStatusProductionPaths);
     expect(discoveredStatusProductionPaths).toEqual(expectedStatusProductionPaths);
     expect(inventory.sourcePaths).toEqual(expect.arrayContaining([...inventory.runtimeRootPaths]));

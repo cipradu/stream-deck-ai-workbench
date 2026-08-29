@@ -26,6 +26,7 @@ import { falBalanceProviderModule } from "./fal/index.js";
 import { jinaBalanceProviderModule } from "./jina/index.js";
 import { moonshotBalanceProviderModule } from "./moonshot/index.js";
 import { openAiApiBalanceProviderModule } from "./openai-api/index.js";
+import { openrouterBalanceProviderModule } from "./openrouter/index.js";
 import { runpodBalanceProviderModule } from "./runpod/index.js";
 import { speechmaticsBalanceProviderModule } from "./speechmatics/index.js";
 import { tavilyBalanceProviderModule } from "./tavily/index.js";
@@ -55,6 +56,7 @@ export const balanceProviderModules: readonly BalanceProviderModule[] = [
   jinaBalanceProviderModule,
   moonshotBalanceProviderModule,
   deepseekBalanceProviderModule,
+  openrouterBalanceProviderModule,
 ];
 
 export function normalizeBalanceProviderResponse(

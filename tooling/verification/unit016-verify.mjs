@@ -161,6 +161,7 @@ const expectedBalanceProviders = [
   "elevenlabs",
   "runpod",
   "speechmatics",
+  "openrouter",
 ];
 const expectedStatusProviders = ["anthropic-api", "openai-api", "moonshot", "minimax"];
 const expectedStatusProviderOptions = [
@@ -460,7 +461,7 @@ function checkManifest() {
     "Status PI has the exact registry-derived provider option inventory",
   );
   assert(
-    arraysEqual(statusPiSettingNames, ["providerId"]),
+    arraysEqual(statusPiSettingNames, ["providerId", "intervalSeconds"]),
     "Status PI exposes exactly the Provider setting",
   );
   console.log("[unit016] pass: manifest sanity");
@@ -675,7 +676,7 @@ function checkDocsAlignment() {
     "**Actions:** Usage, Balance, and Status",
     "### Status",
     "public no-credential status source",
-    "fixed 600-second healthy cadence",
+    "60 to 3600 seconds (default 600)",
     "OpenAI keeps the active-incident count as the primary value",
     "worse independently mapped value of highest active incident impact and aggregate provider status",
     "OpenAI aggregate `none` is green, `maintenance` is blue, `minor` is amber, and `major` or `critical` is red",
