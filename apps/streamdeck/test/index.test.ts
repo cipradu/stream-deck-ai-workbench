@@ -33,6 +33,7 @@ import type {
 } from "@ai-workbench/scheduler";
 import {
   classifyActionSettingsChange,
+  classifyGlobalSettingsChange,
   parseActionSettings,
   parsePeakHoursWindows,
   parsePropertyInspectorPayload,
@@ -47,7 +48,7 @@ import { listProviderOptionsForFamily } from "../src/property-inspector.js";
 import { prepareLogoSvg } from "../src/logo-loader.js";
 import { renderDisplayInput } from "../src/renderer.js";
 import { createAppManagedRuntime, createRuntimeServices } from "../src/runtime.js";
-import { WORKBENCH_ACTION_DEFINITIONS } from "../src/index.js";
+import { connectAndPrepareStreamDeckShell, WORKBENCH_ACTION_DEFINITIONS } from "../src/index.js";
 import { createSchedulerFetchForActionSettings, withFetchPathLogging } from "../src/scheduler-fetch.js";
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
 import {
@@ -65,6 +66,7 @@ import {
   legacySeverityProfileForBalanceInput,
   legacySeverityProfileForUsageInput,
   parseActionSettingsForFamily,
+  removeLegacyDerivedCredentialFossils,
   toWritableActionSettings,
   withLegacyCredentialProfiles,
   type WritableActionSettings,
@@ -293,12 +295,17 @@ class FakeScheduler implements Scheduler {
   lastDeactivationFor(instanceId: string): SchedulerDeactivateInput | undefined {
     return this.deactivationRecords.findLast((input) => input.instanceId === instanceId);
   }
+
+  settingsChangeCount(): number {
+    return this.settingsChangeRecords.length;
+  }
 }
 
 function createShell(input: {
   readonly scheduler?: FakeScheduler;
   readonly globalWrites?: unknown[];
   readonly globalRead?: unknown;
+  readonly globalRawRead?: unknown;
   readonly logEvents?: SanitizedLogEvent[];
 } = {}): { readonly shell: StreamDeckShell; readonly scheduler: FakeScheduler; readonly globalWrites: unknown[]; readonly logEvents: SanitizedLogEvent[] } {
   const scheduler = input.scheduler ?? new FakeScheduler();
@@ -306,6 +313,7 @@ function createShell(input: {
   const logEvents = input.logEvents ?? [];
   const globalSettings: GlobalSettingsPort = {
     read: async () => input.globalRead ?? {},
+    readRaw: async () => input.globalRawRead ?? input.globalRead ?? {},
     write: async (settings) => {
       globalWrites.push(settings);
     },
@@ -326,6 +334,58 @@ function createShell(input: {
       providerRequestRuntime: testProviderRequestRuntime,
       scheduler,
     }),
+  };
+}
+
+function createClosedStartupShell(input: {
+  readonly initialGlobalSettings: unknown;
+  readonly readFails?: boolean;
+  readonly writeFails?: boolean;
+}): {
+  readonly globalWrites: unknown[];
+  readonly logEvents: SanitizedLogEvent[];
+  readonly scheduler: FakeScheduler;
+  readonly shell: StreamDeckShell;
+  readonly writeAttempts: () => number;
+} {
+  let globalSettings = input.initialGlobalSettings;
+  let writeAttempts = 0;
+  const globalWrites: unknown[] = [];
+  const logEvents: SanitizedLogEvent[] = [];
+  const scheduler = new FakeScheduler();
+  const shell = new StreamDeckShell({
+    globalSettings: {
+      read: async () => withLegacyCredentialProfiles(globalSettings),
+      readRaw: async () => {
+        if (input.readFails === true) {
+          throw new Error("sentinel startup raw-read failure");
+        }
+        return globalSettings;
+      },
+      write: async (settings) => {
+        writeAttempts += 1;
+        if (input.writeFails === true) {
+          throw new Error("sentinel startup write failure");
+        }
+        globalWrites.push(settings);
+        globalSettings = settings;
+      },
+    },
+    logSink: {
+      write: (event) => {
+        logEvents.push(event);
+      },
+    },
+    providerRequestRuntime: testProviderRequestRuntime,
+    scheduler,
+    startupReady: false,
+  });
+  return {
+    globalWrites,
+    logEvents,
+    scheduler,
+    shell,
+    writeAttempts: () => writeAttempts,
   };
 }
 
@@ -1586,6 +1646,344 @@ describe("settings boundary and PI writes", () => {
     });
   });
 
+  it("removes exactly the 15 legacy-slot credential fossils without mutating or dropping unrelated store content", () => {
+    const legacyFossilIdentities = [
+      ["usage", "zai-coding-plan", "plugin-api-key", "profile:usage:zai-coding-plan:plugin-api-key"],
+      ["usage", "minimax", "plugin-api-key", "profile:usage:minimax:plugin-api-key"],
+      ["balance", "anthropic-api", "admin-api-credential", "profile:balance:anthropic-api:admin-api-credential"],
+      ["balance", "openai-api", "admin-api-credential", "profile:balance:openai-api:admin-api-credential"],
+      ["balance", "fal", "plugin-api-key", "profile:balance:fal:plugin-api-key"],
+      ["balance", "deepgram", "plugin-api-key", "profile:balance:deepgram:plugin-api-key"],
+      ["balance", "elevenlabs", "plugin-api-key", "profile:balance:elevenlabs:plugin-api-key"],
+      ["balance", "runpod", "plugin-api-key", "profile:balance:runpod:plugin-api-key"],
+      ["balance", "speechmatics", "plugin-api-key", "profile:balance:speechmatics:plugin-api-key"],
+      ["balance", "tavily", "plugin-api-key", "profile:balance:tavily:plugin-api-key"],
+      ["balance", "exa", "plugin-api-key", "profile:balance:exa:plugin-api-key"],
+      ["balance", "jina", "plugin-api-key", "profile:balance:jina:plugin-api-key"],
+      ["balance", "moonshot", "plugin-api-key", "profile:balance:moonshot:plugin-api-key"],
+      ["balance", "deepseek", "plugin-api-key", "profile:balance:deepseek:plugin-api-key"],
+      ["balance", "openrouter", "admin-api-credential", "profile:balance:openrouter:admin-api-credential"],
+    ] as const;
+    const fossils = legacyFossilIdentities.map(([actionFamilyId, providerId, credentialClass, profileId]) => ({
+      actionFamilyId,
+      credentialClass,
+      credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+      profileId,
+      providerId,
+    }));
+    const survivor = {
+      actionFamilyId: "balance",
+      credentialClass: "plugin-api-key",
+      credentialMaterial: { kind: "inline-secret", value: "sentinel-key-B" },
+      profileId: "sentinel-profile-genuine",
+      providerId: "fal",
+    } as const;
+    const rawGlobalSettings = {
+      balanceApiKeys: {
+        fal: "",
+        openrouter: "sentinel-key-B",
+      },
+      credentialProfiles: [...fossils, survivor, { retainedMalformedEntry: true }],
+      unrelatedContent: {
+        orderedValues: ["first", "second", "third"],
+      },
+      zaiApiKey: "sentinel-key-B",
+    } as const;
+
+    const first = removeLegacyDerivedCredentialFossils(rawGlobalSettings);
+
+    expect(first.removedProfileIds).toEqual(legacyFossilIdentities.map(([, , , profileId]) => profileId).sort());
+    expect(first.payload).toEqual({
+      ...rawGlobalSettings,
+      credentialProfiles: [survivor, { retainedMalformedEntry: true }],
+    });
+    expect(rawGlobalSettings.credentialProfiles).toHaveLength(17);
+
+    const second = removeLegacyDerivedCredentialFossils(first.payload);
+    expect(second).toEqual({ payload: first.payload, removedProfileIds: [] });
+  });
+
+  it("connects before running the startup settings task", async () => {
+    let connected = false;
+    let prepareCalls = 0;
+    let releaseConnect: (() => void) | undefined;
+    const connectGate = new Promise<void>((resolve) => {
+      releaseConnect = resolve;
+    });
+    const startup = connectAndPrepareStreamDeckShell({
+      connect: async () => {
+        await connectGate;
+        connected = true;
+      },
+      prepare: async () => {
+        expect(connected).toBe(true);
+        prepareCalls += 1;
+      },
+    });
+
+    await Promise.resolve();
+    expect(prepareCalls).toBe(0);
+    releaseConnect?.();
+    await startup;
+    expect(prepareCalls).toBe(1);
+  });
+
+  it("cleans fossils once, primes the baseline, then releases queued work without relying on a settings echo", async () => {
+    const fossilProfileId = "profile:balance:openrouter:admin-api-credential";
+    const startupState = createClosedStartupShell({
+      initialGlobalSettings: {
+        balanceApiKeys: { openrouter: "sentinel-key-B" },
+        credentialProfiles: [
+          {
+            actionFamilyId: "balance",
+            credentialClass: "admin-api-credential",
+            credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+            profileId: fossilProfileId,
+            providerId: "openrouter",
+          },
+        ],
+        unrelatedContent: { preserved: true },
+      },
+    });
+    const actionSettings = { vendor: "openrouter", warnFloor: "10", criticalFloor: "5" } as const;
+    const action = new FakeAction("action-startup-cleanup", actionSettings);
+    const queuedAppear = startupState.shell.handleWillAppear("balance", action, actionSettings);
+
+    expect(startupState.scheduler.activationCount()).toBe(0);
+    expect(startupState.globalWrites).toEqual([]);
+
+    await startupState.shell.prepareGlobalSettingsStartup();
+    await queuedAppear;
+
+    expect(startupState.globalWrites).toHaveLength(2);
+    expect(startupState.globalWrites[0]).toEqual({
+      balanceApiKeys: { openrouter: "sentinel-key-B" },
+      credentialProfiles: [],
+      unrelatedContent: { preserved: true },
+    });
+    expect(startupState.globalWrites[1]).toMatchObject({
+      credentialProfiles: [],
+      severityProfiles: [
+        {
+          profileId: "floors:balance:openrouter",
+          thresholds: { basis: "absolute", criticalAt: 5, direction: "lower-bound", warningAt: 10 },
+        },
+      ],
+    });
+    expect(startupState.scheduler.activationCount()).toBe(1);
+    expect(startupState.logEvents.filter((event) => event.eventName === "streamdeck-legacy-credential-fossils-removed")).toEqual([
+      expect.objectContaining({
+        context: { reasonCode: "legacy-credential-fossils-removed" },
+        level: "info",
+        message: `Removed legacy-derived credential profile fossils: ${fossilProfileId}.`,
+      }),
+    ]);
+
+    const writesAfterFirstStartup = startupState.globalWrites.length;
+    const removalEventsAfterFirstStartup = startupState.logEvents.filter(
+      (event) => event.eventName === "streamdeck-legacy-credential-fossils-removed",
+    ).length;
+    await startupState.shell.prepareGlobalSettingsStartup();
+    expect(startupState.globalWrites).toHaveLength(writesAfterFirstStartup);
+    expect(
+      startupState.logEvents.filter((event) => event.eventName === "streamdeck-legacy-credential-fossils-removed"),
+    ).toHaveLength(removalEventsAfterFirstStartup);
+  });
+
+  it("holds all five stateful lifecycle handlers in arrival order and passes later work through after draining", async () => {
+    const startupState = createClosedStartupShell({ initialGlobalSettings: {} });
+    const action = new FakeAction("action-ordered-startup", balanceSettings);
+    const unrelatedDisappearingAction = new FakeAction("action-unrelated-disappearance", balanceSettings);
+    let queuedSettlements = 0;
+    const queued = [
+      startupState.shell.handleWillAppear("balance", action, balanceSettings),
+      startupState.shell.handleDidReceiveSettings("balance", action, balanceSettings),
+      startupState.shell.handleKeyDown("balance", action),
+      startupState.shell.handleGlobalSettingsChanged({ balanceApiKeys: { fal: "sentinel-key-A" } }),
+      startupState.shell.handleWillDisappear({ id: unrelatedDisappearingAction.id }),
+    ].map((operation) =>
+      operation.then(() => {
+        queuedSettlements += 1;
+      }),
+    );
+
+    await startupState.shell.handlePropertyInspectorDidAppear("balance");
+    expect(startupState.logEvents).toContainEqual(
+      expect.objectContaining({ eventName: "streamdeck-property-inspector-appeared" }),
+    );
+    expect(startupState.scheduler.activationCount()).toBe(0);
+    expect(startupState.scheduler.settingsChangeCount()).toBe(0);
+    expect(startupState.scheduler.globalSettingsChangeCount()).toBe(0);
+    expect(startupState.scheduler.lastRefreshKey()).toBeUndefined();
+    expect(startupState.scheduler.lastDeactivationFor(unrelatedDisappearingAction.id)).toBeUndefined();
+    expect(queuedSettlements).toBe(0);
+
+    await startupState.shell.prepareGlobalSettingsStartup();
+    await Promise.all(queued);
+
+    expect(startupState.scheduler.activationCount()).toBe(1);
+    expect(startupState.scheduler.settingsChangeCount()).toBe(1);
+    expect(startupState.scheduler.globalSettingsChangeCount()).toBe(1);
+    expect(startupState.scheduler.lastRefreshKey()).toBeDefined();
+    expect(startupState.scheduler.lastDeactivationFor(unrelatedDisappearingAction.id)).toBeUndefined();
+    expect(startupState.scheduler.isActivatedFor(action.id)).toBe(true);
+    expect(queuedSettlements).toBe(5);
+
+    const postDrainAction = new FakeAction("action-post-startup", balanceSettings);
+    await startupState.shell.handleWillAppear("balance", postDrainAction, balanceSettings);
+    expect(startupState.scheduler.isActivatedFor(postDrainAction.id)).toBe(true);
+  });
+
+  it("drains a queued will-appear then will-disappear sequentially so no disappeared action remains active", async () => {
+    const startupState = createClosedStartupShell({ initialGlobalSettings: {} });
+    const actionSettings = { vendor: "openrouter", warnFloor: "10", criticalFloor: "5" } as const;
+    const action = new FakeAction("action-disappeared-during-startup", actionSettings);
+    const queuedAppear = startupState.shell.handleWillAppear("balance", action, actionSettings);
+    const queuedDisappear = startupState.shell.handleWillDisappear({ id: action.id });
+
+    await startupState.shell.prepareGlobalSettingsStartup();
+    await Promise.all([queuedAppear, queuedDisappear]);
+
+    expect(startupState.scheduler.activationCount()).toBe(0);
+    expect(startupState.scheduler.lastDeactivationFor(action.id)).toBeUndefined();
+    expect(startupState.scheduler.isActivatedFor(action.id)).toBe(false);
+    expect(startupState.scheduler.lastRefreshKey()).toBeUndefined();
+    expect(startupState.globalWrites).toEqual([]);
+  });
+
+  it("preserves a later queued reappearance after cancelling only the disappeared startup appearance", async () => {
+    const startupState = createClosedStartupShell({ initialGlobalSettings: {} });
+    const firstAppearance = new FakeAction("action-reappeared-during-startup", balanceSettings);
+    const secondAppearance = new FakeAction(firstAppearance.id, balanceSettings);
+    const queuedFirstAppearance = startupState.shell.handleWillAppear("balance", firstAppearance, balanceSettings);
+    const queuedDisappear = startupState.shell.handleWillDisappear({ id: firstAppearance.id });
+    const queuedSecondAppearance = startupState.shell.handleWillAppear("balance", secondAppearance, balanceSettings);
+
+    await startupState.shell.prepareGlobalSettingsStartup();
+    await Promise.all([queuedFirstAppearance, queuedDisappear, queuedSecondAppearance]);
+
+    expect(startupState.scheduler.activationCount()).toBe(1);
+    expect(startupState.scheduler.isActivatedFor(secondAppearance.id)).toBe(true);
+  });
+
+  it.each([
+    ["raw read", { readFails: true }],
+    ["cleanup write", { writeFails: true }],
+  ] as const)("keeps startup closed and logs a sanitized failure after a %s failure", async (_failureKind, failure) => {
+    const fossilProfileId = "profile:balance:openrouter:admin-api-credential";
+    const startupState = createClosedStartupShell({
+      initialGlobalSettings: {
+        balanceApiKeys: { openrouter: "sentinel-key-B" },
+        credentialProfiles: [
+          {
+            actionFamilyId: "balance",
+            credentialClass: "admin-api-credential",
+            credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+            profileId: fossilProfileId,
+            providerId: "openrouter",
+          },
+        ],
+      },
+      ...failure,
+    });
+    const actionSettings = { vendor: "openrouter", warnFloor: "10", criticalFloor: "5" } as const;
+    const action = new FakeAction(`action-failed-startup-${_failureKind}`, actionSettings);
+    let queuedSettled = false;
+    void startupState.shell.handleWillAppear("balance", action, actionSettings).then(
+      () => {
+        queuedSettled = true;
+      },
+      () => {
+        queuedSettled = true;
+      },
+    );
+
+    await startupState.shell.prepareGlobalSettingsStartup();
+    await Promise.resolve();
+
+    expect(queuedSettled).toBe(false);
+    expect(startupState.scheduler.activationCount()).toBe(0);
+    expect(startupState.scheduler.lastRefreshKey()).toBeUndefined();
+    expect(startupState.globalWrites).toEqual([]);
+    expect(startupState.writeAttempts()).toBe("writeFails" in failure ? 1 : 0);
+    expect(startupState.logEvents).toContainEqual(
+      expect.objectContaining({
+        context: { reasonCode: "global-settings-startup-failed" },
+        eventName: "streamdeck-global-settings-startup-failed",
+        level: "warn",
+        message: "Global settings startup preparation failed.",
+      }),
+    );
+  });
+
+  it("builds severity-floor migration writes from the raw store while preserving every non-target entry", async () => {
+    const genuineCredentialProfile = {
+      actionFamilyId: "balance",
+      credentialClass: "plugin-api-key",
+      credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+      profileId: "sentinel-profile-genuine",
+      providerId: "fal",
+    } as const;
+    const existingSeverityProfile = {
+      profileId: "sentinel-severity-existing",
+      thresholds: { basis: "absolute", direction: "lower-bound", warningAt: 25 },
+    } as const;
+    const rawGlobalSettings = {
+      balanceApiKeys: { fal: "sentinel-key-B" },
+      credentialProfiles: [genuineCredentialProfile],
+      severityProfiles: [existingSeverityProfile],
+      unknownRawField: {
+        orderedValues: ["first", "second", "third"],
+        preserved: true,
+      },
+      zaiApiKey: "sentinel-key-A",
+    } as const;
+    const mergedReadView = withLegacyCredentialProfiles(rawGlobalSettings);
+    const actionSettings = {
+      vendor: "fal",
+      warnFloor: "10",
+      criticalFloor: "5",
+    } as const;
+    const action = new FakeAction("action-raw-severity-migration", actionSettings);
+    const { globalWrites, shell } = createShell({
+      globalRawRead: rawGlobalSettings,
+      globalRead: mergedReadView,
+    });
+
+    await shell.handleWillAppear("balance", action, actionSettings);
+
+    expect(globalWrites).toHaveLength(1);
+    expect(globalWrites[0]).toEqual({
+      ...rawGlobalSettings,
+      credentialProfiles: [genuineCredentialProfile],
+      severityProfiles: [
+        existingSeverityProfile,
+        {
+          profileId: "floors:balance:fal",
+          thresholds: {
+            basis: "absolute",
+            criticalAt: 5,
+            direction: "lower-bound",
+            warningAt: 10,
+          },
+        },
+      ],
+    });
+  });
+
+  it("does not write global settings when action settings contain no legacy severity floors", async () => {
+    const actionSettings = { vendor: "fal" } as const;
+    const action = new FakeAction("action-without-severity-floors", actionSettings);
+    const { globalWrites, shell } = createShell({
+      globalRawRead: { balanceApiKeys: { fal: "sentinel-key-A" } },
+      globalRead: withLegacyCredentialProfiles({ balanceApiKeys: { fal: "sentinel-key-A" } }),
+    });
+
+    await shell.handleWillAppear("balance", action, actionSettings);
+
+    expect(globalWrites).toEqual([]);
+  });
+
   it("rejects secret-bearing action settings on receipt and never activates a fetch for them", async () => {
     const action = new FakeAction("action-secret");
     const { logEvents, scheduler, shell } = createShell();
@@ -2192,6 +2590,24 @@ describe("credential resolution to Redacted<string>", () => {
     return parsed.value;
   }
 
+  function resolvedOpenRouterActionSettings() {
+    const parsed = parseActionSettings({
+      familyId: "balance",
+      providerId: "openrouter",
+      refreshIntervalSeconds: 600,
+      displayPreferences: { label: "OpenRouter" },
+      credentialProfileRef: {
+        kind: "credential-profile",
+        credentialClass: "admin-api-credential",
+        profileId: "profile:balance:openrouter:admin-api-credential",
+      },
+    });
+    if (!parsed.ok) {
+      throw new Error("OpenRouter fixture action settings must parse");
+    }
+    return parsed.value;
+  }
+
   const globalSettingsWithSecret = {
     credentialProfiles: [
       {
@@ -2228,6 +2644,79 @@ describe("credential resolution to Redacted<string>", () => {
       globalSettings: { credentialProfiles: [], severityProfiles: [] },
     });
 
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      return;
+    }
+    expect(result.failure.displayState).toBe("missing-credentials");
+  });
+
+  it("resolves the current legacy field after cleanup instead of a historical fossil", () => {
+    const fossilProfileId = "profile:balance:openrouter:admin-api-credential";
+    const previousMergedView = withLegacyCredentialProfiles({ balanceApiKeys: { openrouter: "sentinel-key-A" } });
+    const cleanup = removeLegacyDerivedCredentialFossils({
+      balanceApiKeys: { openrouter: "sentinel-key-B" },
+      credentialProfiles: [
+        {
+          actionFamilyId: "balance",
+          credentialClass: "admin-api-credential",
+          credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+          profileId: fossilProfileId,
+          providerId: "openrouter",
+        },
+      ],
+    });
+    const currentMergedView = withLegacyCredentialProfiles(cleanup.payload);
+
+    const result = resolveCredentialMaterialFromGlobalSettings({
+      actionSettings: resolvedOpenRouterActionSettings(),
+      globalSettings: currentMergedView,
+    });
+    const classification = classifyGlobalSettingsChange(previousMergedView, currentMergedView);
+
+    expect(cleanup.removedProfileIds).toEqual([fossilProfileId]);
+    expect(classification).toMatchObject({
+      ok: true,
+      value: {
+        affectedCredentialProfiles: [
+          {
+            actionFamilyId: "balance",
+            credentialClass: "admin-api-credential",
+            profileId: fossilProfileId,
+            providerId: "openrouter",
+          },
+        ],
+        kind: "provider-source-affecting",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(Redacted.value(result.value.value)).toBe("sentinel-key-B");
+  });
+
+  it("resolves a cleared legacy field as missing credentials after fossil cleanup", () => {
+    const fossilProfileId = "profile:balance:openrouter:admin-api-credential";
+    const cleanup = removeLegacyDerivedCredentialFossils({
+      balanceApiKeys: { openrouter: "" },
+      credentialProfiles: [
+        {
+          actionFamilyId: "balance",
+          credentialClass: "admin-api-credential",
+          credentialMaterial: { kind: "inline-secret", value: "sentinel-key-A" },
+          profileId: fossilProfileId,
+          providerId: "openrouter",
+        },
+      ],
+    });
+
+    const result = resolveCredentialMaterialFromGlobalSettings({
+      actionSettings: resolvedOpenRouterActionSettings(),
+      globalSettings: withLegacyCredentialProfiles(cleanup.payload),
+    });
+
+    expect(cleanup.removedProfileIds).toEqual([fossilProfileId]);
     expect(result.ok).toBe(false);
     if (result.ok) {
       return;

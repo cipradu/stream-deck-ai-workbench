@@ -34,6 +34,14 @@ export interface StartedStreamDeckPlugin {
   readonly stop: () => Promise<void>;
 }
 
+export async function connectAndPrepareStreamDeckShell(input: {
+  readonly connect: () => Promise<void>;
+  readonly prepare: () => Promise<void>;
+}): Promise<void> {
+  await input.connect();
+  await input.prepare();
+}
+
 interface WorkbenchActionOptions {
   readonly familyId: ActionFamilyId;
   readonly manifestId: string;
@@ -116,11 +124,13 @@ export async function startAiWorkbenchStreamDeckPlugin(deck: typeof streamDeck =
       // Read-side legacy mapping: old-plugin `zaiApiKey`/`balanceApiKeys.<vendor>`
       // keys surface as canonical credential profiles so saved keys keep working.
       read: async () => withLegacyCredentialProfiles(await deck.settings.getGlobalSettings()),
+      readRaw: () => deck.settings.getGlobalSettings(),
       write: (settings) => deck.settings.setGlobalSettings(asJsonObject(settings)),
     },
     logSink,
     providerRequestRuntime: services.providerRequestRuntime,
     scheduler: services.scheduler,
+    startupReady: false,
   });
   const run = createManagedRuntimeRunner(services.managedRuntime, logSink);
   // The render fiber (Effect.repeat(Schedule.fixed)) runs on the shared ManagedRuntime and
@@ -147,9 +157,9 @@ export async function startAiWorkbenchStreamDeckPlugin(deck: typeof streamDeck =
   deck.settings.onDidReceiveGlobalSettings((ev) => {
     void run("streamdeck-global-settings-changed", () => shell.handleGlobalSettingsChanged(ev.settings));
   });
-  await run("streamdeck-connect", () => deck.connect());
-  await run("streamdeck-global-settings-baseline", async () => {
-    shell.primeGlobalSettingsBaseline(await deck.settings.getGlobalSettings());
+  await connectAndPrepareStreamDeckShell({
+    connect: () => deck.connect(),
+    prepare: () => run("streamdeck-global-settings-startup", () => shell.prepareGlobalSettingsStartup()),
   });
 
   return {

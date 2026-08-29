@@ -1124,6 +1124,41 @@ describe("settings change classification", () => {
     expect(serialized).not.toContain("fixture-credential-material-c");
   });
 
+  it("classifies a rotated legacy-slot credential as provider-source-affecting for the exact profile", () => {
+    const credentialProfile = (value: string) => ({
+      actionFamilyId: "balance",
+      credentialClass: "admin-api-credential",
+      credentialMaterial: { kind: "inline-secret", value },
+      profileId: "profile:balance:openrouter:admin-api-credential",
+      providerId: "openrouter",
+    });
+
+    const result = classifyGlobalSettingsChange(
+      { credentialProfiles: [credentialProfile("sentinel-key-A")] },
+      { credentialProfiles: [credentialProfile("sentinel-key-B")] },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        affectedCredentialProfiles: [
+          {
+            actionFamilyId: "balance",
+            credentialClass: "admin-api-credential",
+            profileId: "profile:balance:openrouter:admin-api-credential",
+            providerId: "openrouter",
+          },
+        ],
+        bypassBackoffAllowed: true,
+        kind: "provider-source-affecting",
+        providerRefetchRequired: true,
+        reasons: expect.arrayContaining(["credential-value-changed"]),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("sentinel-key-A");
+    expect(JSON.stringify(result)).not.toContain("sentinel-key-B");
+  });
+
   it("classifies sensitive selector changes without exposing selector material", () => {
     const result = classifyGlobalSettingsChange(globalSettingsPayload, {
       ...globalSettingsPayload,

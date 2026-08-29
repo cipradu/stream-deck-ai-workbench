@@ -12,7 +12,7 @@ A local macOS **Stream Deck plugin** that puts live AI-tooling **usage**, accoun
 
 ## Current status
 
-- **Plugin version:** `0.2.0.14`
+- **Plugin version:** `0.2.0.15`
 - **Actions:** Usage, Balance, and Status
 - **Implemented catalog:** 5 Usage providers, 13 Balance providers, and 4 Status providers
 - **Distribution:** this repository's install path is a source build linked into Stream Deck

@@ -24,6 +24,7 @@ import {
   legacySeverityProfileForBalanceInput,
   legacySeverityProfileForUsageInput,
   parseActionSettingsForFamily,
+  removeLegacyDerivedCredentialFossils,
   upsertSeverityProfilePayload,
   withLegacyCredentialProfiles,
   type WritableActionSettings,
@@ -42,6 +43,7 @@ export interface StreamDeckActionPort {
 
 export interface GlobalSettingsPort {
   readonly read: () => Promise<unknown>;
+  readonly readRaw?: () => Promise<unknown>;
   readonly write: (settings: unknown) => Promise<void>;
 }
 
@@ -51,6 +53,7 @@ export interface StreamDeckShellOptions {
   readonly globalSettings: GlobalSettingsPort;
   readonly logSink: StreamDeckLogSink;
   readonly now?: () => number;
+  readonly startupReady?: boolean;
 }
 
 interface ActiveAction {
@@ -60,6 +63,18 @@ interface ActiveAction {
 }
 
 type KeyFeedback = "alert" | "none" | "ok";
+
+type StartupState = "draining" | "failed" | "pending" | "ready";
+
+interface QueuedStartupOperation {
+  readonly reject: (reason?: unknown) => void;
+  readonly resolve: () => void;
+  readonly run: () => Promise<void>;
+}
+
+interface QueuedStartupAppearance {
+  cancelled: boolean;
+}
 
 export class StreamDeckShell {
   private readonly scheduler: Scheduler;
@@ -71,6 +86,10 @@ export class StreamDeckShell {
   /** Baseline for classifying Property Inspector global-settings writes (legacy-mapped shape). */
   private globalSettingsBaseline: unknown;
   private globalSettingsBaselinePrimed = false;
+  private startupState: StartupState;
+  private readonly startupQueue: QueuedStartupOperation[] = [];
+  private readonly startupQueuedAppearances = new Map<string, QueuedStartupAppearance>();
+  private startupPreparation: Promise<void> | undefined;
   /** Tears down the scheduler output-change subscription on shutdown. */
   private readonly unsubscribeOutputChanged: () => void;
 
@@ -79,6 +98,7 @@ export class StreamDeckShell {
     this.providerRequestRuntime = options.providerRequestRuntime;
     this.globalSettings = options.globalSettings;
     this.logSink = options.logSink;
+    this.startupState = options.startupReady === false ? "pending" : "ready";
     // Imperative-shell wall-clock: Effect `Clock` owns time INSIDE the foundation, but this
     // `now` is read only by the SDK Promise render callbacks (renderSchedulerOutput/renderFailure), which
     // are not Effect programs — so it stays a plain wall-clock at the imperative edge. The `options.now`
@@ -112,6 +132,19 @@ export class StreamDeckShell {
   }
 
   async handleWillAppear(familyId: ActionFamilyId, action: StreamDeckActionPort, rawSettings: unknown): Promise<void> {
+    const queuedAppearance = this.startupState === "ready" ? undefined : { cancelled: false };
+    if (queuedAppearance !== undefined) {
+      this.startupQueuedAppearances.set(action.id, queuedAppearance);
+    }
+    return this.runWhenStartupReady(() => {
+      if (this.startupQueuedAppearances.get(action.id) === queuedAppearance) {
+        this.startupQueuedAppearances.delete(action.id);
+      }
+      return queuedAppearance?.cancelled === true ? Promise.resolve() : this.handleWillAppearReady(familyId, action, rawSettings);
+    });
+  }
+
+  private async handleWillAppearReady(familyId: ActionFamilyId, action: StreamDeckActionPort, rawSettings: unknown): Promise<void> {
     const parsed = parseActionSettingsForFamily(familyId, rawSettings);
     if (!parsed.ok) {
       await this.renderFailure(action, parsed.failure);
@@ -146,7 +179,11 @@ export class StreamDeckShell {
     }
 
     try {
-      const previous = await this.globalSettings.read();
+      const readRaw = this.globalSettings.readRaw;
+      if (readRaw === undefined) {
+        return;
+      }
+      const previous = await readRaw();
       if (severityProfileAlreadyPresent(previous, profile)) {
         return;
       }
@@ -155,9 +192,10 @@ export class StreamDeckShell {
       if (!parsedGlobalSettings.ok) {
         return;
       }
-      // Write the validated merged payload as-is: Property Inspector-owned
+      // Write the validated raw-store-based payload as-is: Property Inspector-owned
       // fields (zaiApiKey, balanceApiKeys.<vendor>) must survive plugin-side
-      // writes so the PI keeps showing configured keys.
+      // writes so the PI keeps showing configured keys, while read-side legacy-derived
+      // credential profiles never cross into the store.
       await this.globalSettings.write(merged);
       this.globalSettingsBaseline = withLegacyCredentialProfiles(merged);
     } catch {
@@ -166,6 +204,15 @@ export class StreamDeckShell {
   }
 
   async handleWillDisappear(action: Pick<StreamDeckActionPort, "id">): Promise<void> {
+    const queuedAppearance = this.startupState === "ready" ? undefined : this.startupQueuedAppearances.get(action.id);
+    if (queuedAppearance !== undefined) {
+      queuedAppearance.cancelled = true;
+      this.startupQueuedAppearances.delete(action.id);
+    }
+    return this.runWhenStartupReady(() => this.handleWillDisappearReady(action));
+  }
+
+  private async handleWillDisappearReady(action: Pick<StreamDeckActionPort, "id">): Promise<void> {
     const active = this.activeActions.get(action.id);
     if (active === undefined) {
       return;
@@ -189,6 +236,19 @@ export class StreamDeckShell {
   }
 
   async handleDidReceiveSettings(familyId: ActionFamilyId, action: StreamDeckActionPort, rawSettings: unknown): Promise<void> {
+    const queuedAppearance = this.startupState === "ready" ? undefined : this.startupQueuedAppearances.get(action.id);
+    return this.runWhenStartupReady(() =>
+      queuedAppearance?.cancelled === true
+        ? Promise.resolve()
+        : this.handleDidReceiveSettingsReady(familyId, action, rawSettings),
+    );
+  }
+
+  private async handleDidReceiveSettingsReady(
+    familyId: ActionFamilyId,
+    action: StreamDeckActionPort,
+    rawSettings: unknown,
+  ): Promise<void> {
     const parsed = parseActionSettingsForFamily(familyId, rawSettings);
     if (!parsed.ok) {
       await this.log("warn", "streamdeck-action-settings-rejected", parsed.failure.safePublicMessage, {
@@ -234,6 +294,13 @@ export class StreamDeckShell {
   }
 
   async handleKeyDown(familyId: ActionFamilyId, action: StreamDeckActionPort): Promise<void> {
+    const queuedAppearance = this.startupState === "ready" ? undefined : this.startupQueuedAppearances.get(action.id);
+    return this.runWhenStartupReady(() =>
+      queuedAppearance?.cancelled === true ? Promise.resolve() : this.handleKeyDownReady(familyId, action),
+    );
+  }
+
+  private async handleKeyDownReady(familyId: ActionFamilyId, action: StreamDeckActionPort): Promise<void> {
     const active = await this.ensureActive(familyId, action);
     if (active === undefined) {
       return;
@@ -273,6 +340,73 @@ export class StreamDeckShell {
     this.globalSettingsBaselinePrimed = true;
   }
 
+  async prepareGlobalSettingsStartup(): Promise<void> {
+    if (this.startupState === "ready" || this.startupState === "failed") {
+      return;
+    }
+    if (this.startupPreparation !== undefined) {
+      return this.startupPreparation;
+    }
+
+    this.startupPreparation = this.prepareGlobalSettingsStartupOnce();
+    return this.startupPreparation;
+  }
+
+  private async prepareGlobalSettingsStartupOnce(): Promise<void> {
+    try {
+      const readRaw = this.globalSettings.readRaw;
+      if (readRaw === undefined) {
+        throw new Error("Raw global-settings read is unavailable.");
+      }
+      const rawSettings = await readRaw();
+      const cleanup = removeLegacyDerivedCredentialFossils(rawSettings);
+      if (cleanup.removedProfileIds.length > 0) {
+        await this.globalSettings.write(cleanup.payload);
+        await this.log(
+          "info",
+          "streamdeck-legacy-credential-fossils-removed",
+          `Removed legacy-derived credential profile fossils: ${cleanup.removedProfileIds.join(", ")}.`,
+          { reasonCode: "legacy-credential-fossils-removed" },
+        );
+      }
+      this.primeGlobalSettingsBaseline(cleanup.payload);
+    } catch {
+      this.startupState = "failed";
+      await this.log("warn", "streamdeck-global-settings-startup-failed", "Global settings startup preparation failed.", {
+        reasonCode: "global-settings-startup-failed",
+      });
+      return;
+    }
+
+    await this.drainStartupQueue();
+  }
+
+  private async drainStartupQueue(): Promise<void> {
+    this.startupState = "draining";
+    while (this.startupQueue.length > 0) {
+      const operation = this.startupQueue.shift();
+      if (operation === undefined) {
+        continue;
+      }
+      try {
+        await operation.run();
+        operation.resolve();
+      } catch (error: unknown) {
+        operation.reject(error);
+      }
+    }
+    this.startupState = "ready";
+  }
+
+  private runWhenStartupReady(operation: () => Promise<void>): Promise<void> {
+    if (this.startupState === "ready") {
+      return operation();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.startupQueue.push({ reject, resolve, run: operation });
+    });
+  }
+
   /**
    * Handles Stream Deck's did-receive-global-settings event (fired when the
    * Property Inspector's `global`-bound fields save). Classifies the change
@@ -280,6 +414,10 @@ export class StreamDeckShell {
    * plugin's paste-a-key-and-it-takes-effect-immediately behavior.
    */
   async handleGlobalSettingsChanged(rawSettings: unknown): Promise<void> {
+    return this.runWhenStartupReady(() => this.handleGlobalSettingsChangedReady(rawSettings));
+  }
+
+  private async handleGlobalSettingsChangedReady(rawSettings: unknown): Promise<void> {
     const next = withLegacyCredentialProfiles(rawSettings);
     const previous = this.globalSettingsBaseline;
     this.globalSettingsBaseline = next;

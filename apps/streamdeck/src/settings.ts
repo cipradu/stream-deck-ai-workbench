@@ -128,6 +128,49 @@ export function canonicalCredentialProfileId(familyId: ActionFamilyId, providerI
   return ["profile", familyId, providerId, credentialClass].join(":");
 }
 
+export function removeLegacyDerivedCredentialFossils(globalSettings: unknown): {
+  readonly payload: unknown;
+  readonly removedProfileIds: readonly string[];
+} {
+  if (!isRecord(globalSettings) || !Array.isArray(globalSettings.credentialProfiles)) {
+    return { payload: globalSettings, removedProfileIds: [] };
+  }
+
+  const fossilProfileIds = legacyDerivedCredentialProfileIds();
+  const removedProfileIds = globalSettings.credentialProfiles.flatMap((profile) =>
+    isRecord(profile) && typeof profile.profileId === "string" && fossilProfileIds.has(profile.profileId)
+      ? [profile.profileId]
+      : [],
+  );
+  if (removedProfileIds.length === 0) {
+    return { payload: globalSettings, removedProfileIds: [] };
+  }
+
+  const payload = cloneJsonLike(globalSettings) as Record<string, unknown>;
+  payload.credentialProfiles = cloneJsonLikeArray(
+    globalSettings.credentialProfiles.filter(
+      (profile) => !(isRecord(profile) && typeof profile.profileId === "string" && fossilProfileIds.has(profile.profileId)),
+    ),
+  );
+  return {
+    payload,
+    removedProfileIds: [...new Set(removedProfileIds)].sort(),
+  };
+}
+
+function legacyDerivedCredentialProfileIds(): ReadonlySet<string> {
+  return new Set([
+    ...Object.values(LEGACY_USAGE_GLOBAL_KEYS).map((providerId) => {
+      const credentialClass = canonicalCredentialClassFor("usage", providerId);
+      return canonicalCredentialProfileId("usage", providerId, credentialClass);
+    }),
+    ...Object.values(LEGACY_BALANCE_PROVIDER_IDS).map((providerId) => {
+      const credentialClass = canonicalCredentialClassFor("balance", providerId);
+      return canonicalCredentialProfileId("balance", providerId, credentialClass);
+    }),
+  ]);
+}
+
 function legacyCredentialProfiles(input: Readonly<Record<string, unknown>>): readonly Record<string, unknown>[] {
   const profiles: Record<string, unknown>[] = [];
 
