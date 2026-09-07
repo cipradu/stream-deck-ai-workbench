@@ -4562,3 +4562,84 @@ describe("sanitized SDK logging sink", () => {
     expect(calls).toEqual(["sdk:bound-call: message"]);
   });
 });
+
+describe("usage credential refresh is single-flighted", () => {
+  // Regression cover for a defect that signed the user out. Four Claude keys polled together and
+  // each spawned its own refresh (observed: 3 flights ending in the same second, elapsedMs
+  // 3501/2883/2537). OAuth refresh tokens ROTATE, so the first flight to land invalidates the
+  // token the others still hold; those fail, and the vendor CLI blanks the whole credential store
+  // on a failed refresh (measured: accessToken "", refreshToken "", expiresAt 0). Concurrency is
+  // therefore not a performance concern here — it is what destroys the credential.
+
+  it("collapses concurrent refreshes for one provider into a single subprocess", async () => {
+    let spawns = 0;
+    const runner = async (): Promise<void> => {
+      spawns += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+
+    await Promise.all([
+      refreshClaudeCodeCredential(runner),
+      refreshClaudeCodeCredential(runner),
+      refreshClaudeCodeCredential(runner),
+      refreshClaudeCodeCredential(runner),
+    ]);
+
+    expect(spawns).toBe(1);
+  });
+
+  it("still allows a later non-overlapping refresh", async () => {
+    let spawns = 0;
+    const runner = async (): Promise<void> => {
+      spawns += 1;
+    };
+
+    await refreshClaudeCodeCredential(runner);
+    await refreshClaudeCodeCredential(runner);
+
+    expect(spawns).toBe(2);
+  });
+
+  it("stops re-running a failing refresh, so a broken credential is not repeatedly rewritten", async () => {
+    let spawns = 0;
+    const failing = async (): Promise<void> => {
+      spawns += 1;
+      throw new Error("refresh failed");
+    };
+    let clock = 5_000_000;
+    const now = (): number => clock;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(refreshClaudeCodeCredential(failing, process.env, now)).rejects.toThrow();
+    }
+    expect(spawns).toBe(1);
+
+    // ...but the suppression is a cooldown, not a permanent latch.
+    clock += 16 * 60_000;
+    await expect(refreshClaudeCodeCredential(failing, process.env, now)).rejects.toThrow();
+    expect(spawns).toBe(2);
+  });
+
+  it("keeps each provider's refresh gate independent", async () => {
+    let claudeSpawns = 0;
+    let kimiSpawns = 0;
+    const claudeRunner = async (): Promise<void> => {
+      claudeSpawns += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+    const kimiRunner = async (): Promise<void> => {
+      kimiSpawns += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+
+    await Promise.all([
+      refreshClaudeCodeCredential(claudeRunner),
+      refreshClaudeCodeCredential(claudeRunner),
+      refreshKimiCodeCredential(kimiRunner),
+      refreshKimiCodeCredential(kimiRunner),
+    ]);
+
+    expect(claudeSpawns).toBe(1);
+    expect(kimiSpawns).toBe(1);
+  });
+});

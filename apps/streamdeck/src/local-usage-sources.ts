@@ -55,6 +55,18 @@ export type KimiCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 export type ClaudeCodeRefreshCommand = UsageCredentialRefreshCommand;
 export type ClaudeCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 
+/**
+ * `refreshCredential` asks the vendor CLI to refresh its own credential. That is the ONLY recovery
+ * path available — there is no supported force-refresh command, and the plugin must not perform the
+ * OAuth grant itself (refresh tokens rotate; racing the user's own CLI can sign them out).
+ *
+ * It is routed through {@link singleFlightRefresh} because an unserialized refresh is destructive:
+ * refresh tokens rotate, so concurrent refreshes are guaranteed to fail for every flight but the
+ * first, and the CLI blanks the whole credential store on a failed refresh (measured:
+ * `accessToken: ""`, `refreshToken: ""`, `expiresAt: 0`). With four Claude keys polling together
+ * that turned one expired token into a signed-out user, and matches the blanked local Keychain
+ * item. Serializing means N keys cause exactly one refresh, which is the case that can succeed.
+ */
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
   return {
     claudeCode: {
@@ -210,9 +222,69 @@ export async function resolveClaudeCodeCredential(
   return firstFailure ?? { ok: false, reasonCode: "claude-code-file-unreadable" };
 }
 
+/**
+ * Serializes credential refreshes so concurrent keys can never race each other.
+ *
+ * OAuth refresh tokens ROTATE: the first refresh to land invalidates the token every other
+ * in-flight refresh is still holding, so those are guaranteed to fail — and the vendor CLI blanks
+ * the whole credential store when a refresh fails (measured: `accessToken: ""`, `refreshToken: ""`,
+ * `expiresAt: 0`). Four Claude keys polling together therefore turned one expired token into a
+ * signed-out user. Observed in the outage log: 3 flights ending in the same second (18:53:22,
+ * elapsedMs 3501/2883/2537).
+ *
+ * Every caller for a provider shares ONE underlying refresh and awaits the same promise, so N keys
+ * cause exactly one subprocess. `cooldownUntilMs` then holds off further attempts after a FAILED
+ * refresh, so a genuinely broken credential is not re-attacked on every poll — without it, a
+ * refresh that fails for any reason would be retried by every key on every cycle.
+ */
+interface RefreshGate {
+  inFlight: Promise<void> | undefined;
+  cooldownUntilMs: number;
+}
+const REFRESH_FAILURE_COOLDOWN_MS = 15 * 60_000;
+const claudeCodeRefreshGate: RefreshGate = { inFlight: undefined, cooldownUntilMs: 0 };
+const kimiCodeRefreshGate: RefreshGate = { inFlight: undefined, cooldownUntilMs: 0 };
+
+function singleFlightRefresh(gate: RefreshGate, perform: () => Promise<void>, now: () => number): Promise<void> {
+  if (gate.inFlight !== undefined) {
+    return gate.inFlight;
+  }
+  if (now() < gate.cooldownUntilMs) {
+    // Still cooling down from a failed refresh. Report failure WITHOUT spawning, so the adapter
+    // surfaces `*-credential-refresh-failed` instead of re-running a subprocess that can blank
+    // the store again.
+    return Promise.reject(new Error("credential refresh is cooling down after a prior failure"));
+  }
+  const flight = perform()
+    .then(() => {
+      gate.cooldownUntilMs = 0;
+    })
+    .catch((error: unknown) => {
+      gate.cooldownUntilMs = now() + REFRESH_FAILURE_COOLDOWN_MS;
+      throw error;
+    })
+    .finally(() => {
+      gate.inFlight = undefined;
+    });
+  gate.inFlight = flight;
+  return flight;
+}
+
 export async function refreshClaudeCodeCredential(
   runCommand: ClaudeCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
+  now: () => number = () => Date.now(),
+): Promise<void> {
+  return singleFlightRefresh(
+    claudeCodeRefreshGate,
+    () => performClaudeCodeRefresh(runCommand, sourceEnvironment),
+    now,
+  );
+}
+
+async function performClaudeCodeRefresh(
+  runCommand: ClaudeCodeRefreshCommandRunner,
+  sourceEnvironment: NodeJS.ProcessEnv,
 ): Promise<void> {
   const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-claude-refresh-"));
   try {
@@ -421,6 +493,18 @@ export async function readKimiCodeCredential(): Promise<KimiCodeCredentialResult
 export async function refreshKimiCodeCredential(
   runCommand: KimiCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
+  now: () => number = () => Date.now(),
+): Promise<void> {
+  return singleFlightRefresh(
+    kimiCodeRefreshGate,
+    () => performKimiCodeRefresh(runCommand, sourceEnvironment),
+    now,
+  );
+}
+
+async function performKimiCodeRefresh(
+  runCommand: KimiCodeRefreshCommandRunner,
+  sourceEnvironment: NodeJS.ProcessEnv,
 ): Promise<void> {
   const kimiCodeHome = sourceEnvironment.KIMI_CODE_HOME?.trim() || DEFAULT_KIMI_CODE_HOME;
   const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-kimi-refresh-"));
