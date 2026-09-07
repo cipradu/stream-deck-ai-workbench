@@ -538,7 +538,7 @@ async function execFileText(command: string, args: readonly string[]): Promise<s
 
 async function runUsageCredentialRefreshCommand(input: UsageCredentialRefreshCommand): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       input.command,
       [...input.args],
       {
@@ -556,6 +556,16 @@ async function runUsageCredentialRefreshCommand(input: UsageCredentialRefreshCom
         resolve();
       },
     );
+
+    // Close the child's stdin immediately. These refresh CLIs read stdin for piped input and block
+    // waiting on it; `execFile` hands the child a pipe we never write to and never close, so the
+    // CLI stalls the full wait before proceeding ("no stdin data received in 3s, proceeding
+    // without it"). Measured on the Claude CLI: 4193ms with the pipe left open vs 1349/1384ms with
+    // it closed, same exit code 0 and same stdout. Sending EOF cannot lose data because nothing
+    // ever writes here. Note `execFile` ignores an `stdio` option — it owns its own pipes — so
+    // ending the stream on the returned child is the only way to close it without giving up
+    // `maxBuffer`/`timeout`/`encoding`.
+    child.stdin?.end();
   });
 }
 

@@ -279,12 +279,20 @@ export function createClaudeCodeUsageSourceOperation(
         return { credential: recoveredCredential, refreshCompleted } as const;
       });
 
-      // Proactive stale-`expiresAt` recovery BEFORE the first call. The shell callback lets the
-      // Claude CLI refresh its own Keychain item; the adapter then performs one readback.
+      // Proactive stale-`expiresAt` recovery BEFORE the first call. The shell callback asks the
+      // Claude CLI to refresh its own stored credential; the adapter then performs one readback.
+      // (The CLI owns which store it writes — Keychain when writable, else `~/.claude/.credentials.json`.
+      // This adapter only reads back through the injected reader and does not assume either store.)
       let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
       let reRead = false;
+      // Distinguishes "the refresh subprocess itself failed" from "refresh ran but the token is
+      // still dead". Both render AUTH REQUIRED, but only the first means OUR recovery is broken,
+      // and collapsing them is why a 75-minute outage produced 39 identical, causeless log lines.
+      let proactiveRefreshFailed = false;
       if (credential.ok && credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
-        credential = (yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged))).credential;
+        const recovered = yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged));
+        credential = recovered.credential;
+        proactiveRefreshFailed = !recovered.refreshCompleted;
         reRead = true;
       }
       if (!credential.ok) {
@@ -302,7 +310,13 @@ export function createClaudeCodeUsageSourceOperation(
       // is the `credential-settings-refresh` retry class (NO back-off armed) the normal poll
       // cadence keeps running and may try one fresh recovery on the next source flight.
       if (credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
-        return yield* Effect.fail(credentialExpiredLocally()).pipe(Effect.mapError(schedulerFailureFromTagged));
+        // `claude-code-credential-refresh-failed` when our own refresh subprocess rejected, plain
+        // `claude-code-credential-expired` when it ran and the credential is simply still dead.
+        // Same category and the same `credential-settings-refresh` retry class either way, so key
+        // rendering and poll cadence are unchanged — only the logged cause differs.
+        return yield* Effect.fail(
+          proactiveRefreshFailed ? credentialRefreshRejected() : credentialExpiredLocally(),
+        ).pipe(Effect.mapError(schedulerFailureFromTagged));
       }
 
       const attempt = (token: Redacted.Redacted<string>) =>

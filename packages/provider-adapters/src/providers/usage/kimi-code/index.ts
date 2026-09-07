@@ -142,8 +142,14 @@ export function createKimiCodeUsageSourceOperation(
 
       let credential = yield* readOnce.pipe(Effect.mapError(schedulerFailureFromTagged));
       let reRead = false;
+      // Distinguishes "the refresh subprocess itself failed" from "refresh ran but the token is
+      // still dead". Both render AUTH REQUIRED, but only the first means OUR recovery is broken,
+      // and collapsing them leaves a credential outage with no diagnosable cause in the log.
+      let proactiveRefreshFailed = false;
       if (credential.ok && credentialIsExpired(credential, nowMs)) {
-        credential = (yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged))).credential;
+        const recovered = yield* recoverAndRead.pipe(Effect.mapError(schedulerFailureFromTagged));
+        credential = recovered.credential;
+        proactiveRefreshFailed = !recovered.refreshCompleted;
         reRead = true;
       }
       if (!credential.ok) {
@@ -152,7 +158,13 @@ export function createKimiCodeUsageSourceOperation(
         });
       }
       if (credentialIsExpired(credential, nowMs)) {
-        return yield* Effect.fail(credentialExpiredLocally()).pipe(Effect.mapError(schedulerFailureFromTagged));
+        // `kimi-code-credential-refresh-failed` when our own refresh subprocess rejected, plain
+        // `kimi-code-credential-expired` when it ran and the credential is simply still dead.
+        // Same category and the same `credential-settings-refresh` retry class either way, so key
+        // rendering and poll cadence are unchanged — only the logged cause differs.
+        return yield* Effect.fail(
+          proactiveRefreshFailed ? credentialRefreshRejected() : credentialExpiredLocally(),
+        ).pipe(Effect.mapError(schedulerFailureFromTagged));
       }
 
       const attempt = (token: Redacted.Redacted<string>) =>
