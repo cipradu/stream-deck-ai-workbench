@@ -21,8 +21,8 @@ import {
   type DisplayRendererInput,
   type MetricDisplayRendererInput,
 } from "@ai-workbench/display";
-import { createSanitizedFailure } from "@ai-workbench/errors";
-import type { SanitizedLogEvent, StreamDeckLogSink } from "@ai-workbench/logging";
+import { createSanitizedFailure, RESPONSE_DIAGNOSTIC_CATALOG } from "@ai-workbench/errors";
+import { sanitizeLogContext, type SanitizedLogEvent, type StreamDeckLogSink } from "@ai-workbench/logging";
 import type {
   Scheduler,
   SchedulerActivateInput,
@@ -53,6 +53,10 @@ import { createSchedulerFetchForActionSettings, withFetchPathLogging } from "../
 import { startRenderLoop, StreamDeckShell, type GlobalSettingsPort, type StreamDeckActionPort } from "../src/shell.js";
 import {
   parseClaudeCodeKeychainPayload,
+  parseClaudeCodeCredentialPayload,
+  resolveClaudeCodeCredential,
+  claudeCodeSourceHintForTests,
+  __resetClaudeCodeSourceHintForTests,
   parseCodexAuthJsonPayload,
   parseKimiCodeCredentialPayload,
   parseLastRateLimitsLine,
@@ -2858,18 +2862,248 @@ describe("local usage source parsing (read-only stores)", () => {
       ok: true,
       accessToken: "fixture-access-token",
     });
-    expect(parseClaudeCodeKeychainPayload("not-json")).toEqual({
-      ok: false,
-      reasonCode: "claude-code-keychain-malformed",
-    });
-    expect(parseClaudeCodeKeychainPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } }))).toEqual({
-      ok: false,
-      reasonCode: "claude-code-keychain-malformed",
-    });
-    expect(parseClaudeCodeKeychainPayload(JSON.stringify({ somethingElse: true }))).toEqual({
-      ok: false,
-      reasonCode: "claude-code-keychain-malformed",
-    });
+    // Each failure shape names its own cause. These previously all returned one collapsed code,
+    // which is what made a real credential failure undiagnosable from the log.
+    const failureCodeFor = (raw: string): string => {
+      const result = parseClaudeCodeKeychainPayload(raw);
+      if (result.ok) {
+        throw new Error("fixture was expected to fail");
+      }
+      return result.reasonCode;
+    };
+
+    expect(failureCodeFor("")).toBe("claude-code-keychain-empty");
+    expect(failureCodeFor("   ")).toBe("claude-code-keychain-empty");
+    expect(failureCodeFor("not-json")).toBe("claude-code-keychain-not-json");
+    expect(failureCodeFor("[1,2,3]")).toBe("claude-code-keychain-root-not-object");
+    expect(failureCodeFor(JSON.stringify({ somethingElse: true }))).toBe("claude-code-keychain-record-missing");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: "nope" }))).toBe("claude-code-keychain-record-not-object");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: null }))).toBe("claude-code-keychain-record-not-object");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: {} }))).toBe("claude-code-keychain-credential-missing");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: { accessToken: "" } }))).toBe("claude-code-keychain-credential-blank");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: { accessToken: "   " } }))).toBe("claude-code-keychain-credential-blank");
+    expect(failureCodeFor(JSON.stringify({ claudeAiOauth: { accessToken: 42 } }))).toBe("claude-code-keychain-credential-invalid");
+  });
+
+  it("keeps every diagnostic catalog code readable through the REAL log sanitizer", () => {
+    // This guard lives here, not in packages/errors, for a structural reason: `errors` cannot
+    // import `logging` (logging re-declares the response-diagnostic type constants locally to
+    // avoid exactly that edge), so a guard inside `errors` could only test a COPY of the rule.
+    // A copy is what makes this class of bug recur: the real gate is `containsForbiddenText`,
+    // which ORs SEVEN predicates — credential words, identifier words (`account`, `team`,
+    // `workspace`, ...), field-value shapes, provider metric values, redaction markers, raw
+    // diagnostic markers, and emails. Testing one of the seven waves the other six through.
+    // `apps/streamdeck` already depends on both packages, so it can assert the real function.
+    for (const code of Object.keys(RESPONSE_DIAGNOSTIC_CATALOG)) {
+      expect(sanitizeLogContext({ reasonCode: code }).reasonCode).toBe(code);
+    }
+  });
+
+  it("carries every Keychain failure through to a log line an operator can read", () => {
+    // The regression seam for the original defect. A code that fails catalog normalization would
+    // be emitted as "unknown"; a code containing a credential-ish word would be emitted as
+    // "redacted". Either would silently restore the undiagnosable state this fix removed.
+    const cases: readonly (readonly [string, string])[] = [
+      ["", "claude-code-keychain-empty"],
+      ["not-json", "claude-code-keychain-not-json"],
+      ["[1,2,3]", "claude-code-keychain-root-not-object"],
+      [JSON.stringify({ somethingElse: true }), "claude-code-keychain-record-missing"],
+      [JSON.stringify({ claudeAiOauth: "nope" }), "claude-code-keychain-record-not-object"],
+      [JSON.stringify({ claudeAiOauth: {} }), "claude-code-keychain-credential-missing"],
+      [JSON.stringify({ claudeAiOauth: { accessToken: "  " } }), "claude-code-keychain-credential-blank"],
+      [JSON.stringify({ claudeAiOauth: { accessToken: 42 } }), "claude-code-keychain-credential-invalid"],
+    ];
+
+    for (const [payload, expected] of cases) {
+      const parsed = parseClaudeCodeKeychainPayload(payload);
+      if (parsed.ok) {
+        throw new Error("fixture was expected to fail");
+      }
+      const failure = createSanitizedFailure({
+        category: "missing-credentials",
+        diagnostics: {
+          boundary: "provider-adapters",
+          reasonCode: parsed.reasonCode,
+          ...(parsed.responseDiagnostic === undefined ? {} : { responseDiagnostic: parsed.responseDiagnostic }),
+        },
+      });
+      expect(failure.diagnostics.reasonCode).toBe(expected);
+      expect(sanitizeLogContext({ reasonCode: failure.diagnostics.reasonCode }).reasonCode).toBe(expected);
+    }
+  });
+
+  it("falls back to the file when the Keychain token is blank, and remembers the source", async () => {
+    __resetClaudeCodeSourceHintForTests();
+    const reads: string[] = [];
+    const readers = {
+      keychain: async () => {
+        reads.push("keychain");
+        // The exact production shape observed on 2026-09-06: valid JSON, container present,
+        // accessToken present but blanked.
+        return parseClaudeCodeKeychainPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } }));
+      },
+      file: async () => {
+        reads.push("file");
+        return parseClaudeCodeCredentialPayload(
+          JSON.stringify({ claudeAiOauth: { accessToken: "fixture-file-token", expiresAt: 4_000_000_000_000 } }),
+          "file",
+        );
+      },
+    };
+
+    const resolved = await resolveClaudeCodeCredential(readers, () => 1_000);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.accessToken).toBe("fixture-file-token");
+    }
+    expect(reads).toEqual(["keychain", "file"]);
+    expect(claudeCodeSourceHintForTests()).toBe("file");
+  });
+
+  it("never re-reads a source within one pass, even when every source fails", async () => {
+    // The anti-loop guarantee: a fixed candidate list, each entry read AT MOST ONCE, then a
+    // terminal failure. A blank Keychain must not send resolution back around to the Keychain.
+    __resetClaudeCodeSourceHintForTests();
+    const reads: string[] = [];
+    const readers = {
+      keychain: async () => {
+        reads.push("keychain");
+        return parseClaudeCodeKeychainPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } }));
+      },
+      file: async () => {
+        reads.push("file");
+        return parseClaudeCodeCredentialPayload(JSON.stringify({ claudeAiOauth: { accessToken: "  " } }), "file");
+      },
+    };
+
+    const resolved = await resolveClaudeCodeCredential(readers, () => 1_000);
+    expect(resolved.ok).toBe(false);
+    expect(reads).toEqual(["keychain", "file"]);
+    expect(reads.filter((r) => r === "keychain")).toHaveLength(1);
+    expect(reads.filter((r) => r === "file")).toHaveLength(1);
+    // Total failure must NOT move the hint, or two dead sources would thrash the order.
+    expect(claudeCodeSourceHintForTests()).toBeUndefined();
+  });
+
+  it("tries the remembered source first, and self-heals when it stops working", async () => {
+    __resetClaudeCodeSourceHintForTests();
+    const good = (token: string) =>
+      JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt: 4_000_000_000_000 } });
+
+    // First pass: keychain blank, file good -> hint becomes "file".
+    await resolveClaudeCodeCredential(
+      {
+        keychain: async () => parseClaudeCodeKeychainPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } })),
+        file: async () => parseClaudeCodeCredentialPayload(good("from-file"), "file"),
+      },
+      () => 1_000,
+    );
+    expect(claudeCodeSourceHintForTests()).toBe("file");
+
+    // Second pass: the file has gone away and the Keychain now holds a real token.
+    const reads: string[] = [];
+    const resolved = await resolveClaudeCodeCredential(
+      {
+        keychain: async () => {
+          reads.push("keychain");
+          return parseClaudeCodeKeychainPayload(good("from-keychain"));
+        },
+        file: async () => {
+          reads.push("file");
+          return { ok: false, reasonCode: "claude-code-file-unreadable" } as const;
+        },
+      },
+      () => 1_000,
+    );
+
+    expect(reads[0]).toBe("file"); // the hint was honored...
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.accessToken).toBe("from-keychain"); // ...but it did not bind
+    }
+    expect(claudeCodeSourceHintForTests()).toBe("keychain"); // and it flipped back
+  });
+
+  it("does not let an expired credential end the search or capture the hint", async () => {
+    // An expired-but-parseable leftover previously counted as a usable result. Returning it
+    // would pin the hint to a dead source and produce a permanent false "not signed in".
+    __resetClaudeCodeSourceHintForTests();
+    const nowMs = 1_000_000;
+    const resolved = await resolveClaudeCodeCredential(
+      {
+        keychain: async () =>
+          parseClaudeCodeKeychainPayload(
+            JSON.stringify({ claudeAiOauth: { accessToken: "stale", expiresAt: nowMs - 1 } }),
+          ),
+        file: async () =>
+          parseClaudeCodeCredentialPayload(
+            JSON.stringify({ claudeAiOauth: { accessToken: "live", expiresAt: nowMs + 60_000 } }),
+            "file",
+          ),
+      },
+      () => nowMs,
+    );
+
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.accessToken).toBe("live");
+    }
+    expect(claudeCodeSourceHintForTests()).toBe("file");
+  });
+
+  it("names the failing source in the emitted code so a degraded store is identifiable", () => {
+    expect(parseClaudeCodeCredentialPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } }), "file").ok).toBe(
+      false,
+    );
+    const fileBlank = parseClaudeCodeCredentialPayload(
+      JSON.stringify({ claudeAiOauth: { accessToken: "" } }),
+      "file",
+    );
+    const keychainBlank = parseClaudeCodeKeychainPayload(JSON.stringify({ claudeAiOauth: { accessToken: "" } }));
+    if (fileBlank.ok || keychainBlank.ok) {
+      throw new Error("fixtures were expected to fail");
+    }
+    expect(fileBlank.reasonCode).toBe("claude-code-file-credential-blank");
+    expect(keychainBlank.reasonCode).toBe("claude-code-keychain-credential-blank");
+    // Same shape, different store — and both survive the real sanitizer.
+    expect(sanitizeLogContext({ reasonCode: fileBlank.reasonCode }).reasonCode).toBe("claude-code-file-credential-blank");
+  });
+
+  it("attaches a structural diagnostic to every shape-typed Keychain failure", () => {
+    // Guards the carry-through the previous test cannot see. That test reconstructs the
+    // diagnostics object, so dropping the `responseDiagnostic` forward anywhere between the
+    // parser and the failure builder would leave it green while the operator silently loses
+    // `expectedResponseType` / `receivedResponseType`. Asserting the parser's own output closes
+    // the first hop; the shape assertions below fix what the later hops must carry.
+    const typed: readonly (readonly [string, string, string])[] = [
+      ["[1,2,3]", "claude-code-keychain-root-not-object", "array"],
+      [JSON.stringify({ claudeAiOauth: null }), "claude-code-keychain-record-not-object", "null"],
+      [JSON.stringify({ claudeAiOauth: { accessToken: 42 } }), "claude-code-keychain-credential-invalid", "number"],
+    ];
+    for (const [payload, code, receivedType] of typed) {
+      const parsed = parseClaudeCodeKeychainPayload(payload);
+      if (parsed.ok) {
+        throw new Error("fixture was expected to fail");
+      }
+      expect(parsed.responseDiagnostic).toEqual({ code, receivedType });
+    }
+
+    // Code-only shapes must carry the code WITHOUT a receivedType: supplying one would fail
+    // catalog normalization and collapse the emitted reason code to the literal "unknown".
+    const codeOnly: readonly (readonly [string, string])[] = [
+      ["", "claude-code-keychain-empty"],
+      ["not-json", "claude-code-keychain-not-json"],
+      [JSON.stringify({ somethingElse: true }), "claude-code-keychain-record-missing"],
+      [JSON.stringify({ claudeAiOauth: {} }), "claude-code-keychain-credential-missing"],
+      [JSON.stringify({ claudeAiOauth: { accessToken: "  " } }), "claude-code-keychain-credential-blank"],
+    ];
+    for (const [payload, code] of codeOnly) {
+      const parsed = parseClaudeCodeKeychainPayload(payload);
+      if (parsed.ok) {
+        throw new Error("fixture was expected to fail");
+      }
+      expect(parsed.responseDiagnostic).toEqual({ code });
+    }
   });
 
   it("parses Codex auth.json in chatgpt mode and rejects other modes with reason codes only", () => {

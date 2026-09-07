@@ -94,7 +94,7 @@ Status uses each provider's public no-credential status source. It counts only i
 
 Local-source Usage providers also require their official tool to be installed and authenticated:
 
-- **Claude Code:** credential in the macOS Keychain; recovery command expected at `~/.local/bin/claude`
+- **Claude Code:** credential in the macOS Keychain **or** `~/.claude/.credentials.json` — whichever currently holds a usable token (`CLAUDE_CONFIG_DIR` relocates the file); recovery command expected at `~/.local/bin/claude`
 - **Codex:** ChatGPT-mode credential in `~/.codex/auth.json`
 - **Kimi Code:** credential and CLI under `~/.kimi-code` unless `KIMI_CODE_HOME` points elsewhere
 
@@ -138,7 +138,8 @@ Status keys are configured from their own **Property Inspector**: add **Status**
 
 ## Credentials & security
 
-- **Local-source credentials stay behind provider-specific readers.** Claude Code is read from the macOS Keychain, Codex from `~/.codex/auth.json`, and Kimi Code from its local credential file. The plugin does not write token material directly.
+- **Local-source credentials stay behind provider-specific readers.** Codex is read from `~/.codex/auth.json` and Kimi Code from its local credential file. Claude Code stores its credential in either of two places, so it is resolved across both (see below). The plugin does not write token material directly, and never writes to a credential store.
+- **Claude Code resolves across both of its credential locations.** Claude Code normally keeps its token in the macOS Keychain, but writes `~/.claude/.credentials.json` instead when the Keychain refuses the write. Either location can end up holding an unusable token — a blanked or expired one — while the other is fine, so the plugin reads them in order and uses the first that yields a usable, unexpired token. Each location is read at most once per attempt; a failing one is not retried in the same pass. The location that last worked is tried first next time, held in memory only and reset when the plugin restarts. That ordering is a preference, never a lock: if the remembered location stops working, the plugin falls through to the other and updates its preference. When no location yields a usable token, the key shows an authentication-required state and the log names which location failed and how.
 - **Claude Code and Kimi Code have bounded expiry recovery.** When a locally known token is expired, or the provider rejects it as expired, the plugin runs the provider's official CLI once in a temporary isolated directory, waits up to 60 seconds, rereads the credential, and retries the request once. The CLI may update its own credential store. If recovery fails, the key shows an authentication-required state and the next normal poll may try again.
 - **Codex does not launch a recovery command.** It rereads the locally managed credential once after an unauthorized response; running or reopening Codex remains the way to renew that login.
 - **API keys** (z.ai, MiniMax, and every Balance vendor) are entered in the Property Inspector and stored in Stream Deck **global settings**, not per-action settings that can be exported with a profile.

@@ -117,6 +117,37 @@ export const RESPONSE_DIAGNOSTIC_CODES = [
   "claude-code-usage-seven-day-not-object",
   "claude-code-usage-seven-day-utilization-invalid",
   "claude-code-usage-seven-day-resets-at-invalid",
+  // Local credential-source boundary (Claude Code Keychain). Each code names the exact static
+  // path and failure shape, so one collapsed "malformed" no longer hides four distinct causes.
+  //
+  // NAMING CONSTRAINT (measured, not assumed): the log sanitizer replaces a whole reason code
+  // with "redacted" when `containsForbiddenText` matches it — that is SEVEN predicates, not one:
+  // credential words (`oauth`, `token`, `secret`, `session`, ...), identifier words (`account`,
+  // `team`, `workspace`, `org`, ...), field-value shapes, provider metric values, redaction
+  // markers, raw-diagnostic markers, and emails. `record` names the container (`.claudeAiOauth`)
+  // and `credential` names the field (`.accessToken`) to stay clear of the credential set.
+  // Enforced by "keeps every diagnostic catalog code readable through the REAL log sanitizer"
+  // in apps/streamdeck/test/index.test.ts — it lives there because this package cannot import
+  // @ai-workbench/logging, so a guard here could only test a copy of the rule.
+  "claude-code-keychain-empty",
+  "claude-code-keychain-not-json",
+  "claude-code-keychain-root-not-object",
+  "claude-code-keychain-record-missing",
+  "claude-code-keychain-record-not-object",
+  "claude-code-keychain-credential-missing",
+  "claude-code-keychain-credential-blank",
+  "claude-code-keychain-credential-invalid",
+  // Same failure shapes for the local credential FILE, which Claude Code writes when the
+  // Keychain rejects a write. Separate codes per source so a log line names WHICH store failed,
+  // not merely how — resolution reads both, so "how" alone would be ambiguous.
+  "claude-code-file-unreadable",
+  "claude-code-file-not-json",
+  "claude-code-file-root-not-object",
+  "claude-code-file-record-missing",
+  "claude-code-file-record-not-object",
+  "claude-code-file-credential-missing",
+  "claude-code-file-credential-blank",
+  "claude-code-file-credential-invalid",
 ] as const;
 export type ResponseDiagnosticCode = (typeof RESPONSE_DIAGNOSTIC_CODES)[number];
 
@@ -143,7 +174,16 @@ const RESPONSE_DIAGNOSTIC_ENTRY_RESETS_AT = Object.freeze({
   receivedTypes: Object.freeze(["array", "boolean", "null", "number", "object"] as const),
 });
 
+/** A required non-empty string field; "string" is the EXPECTED type, so it is never a received type. */
+const RESPONSE_DIAGNOSTIC_ENTRY_CREDENTIAL = Object.freeze({
+  expectedType: "string" as const,
+  receivedTypes: Object.freeze(["array", "boolean", "null", "number", "object"] as const),
+});
+
 const RESPONSE_DIAGNOSTIC_ROOT_SELECTOR = Object.freeze([] as const);
+// Selectors are catalog-internal and never emitted, so they may name the real payload path.
+const RESPONSE_DIAGNOSTIC_KEYCHAIN_RECORD_SELECTOR = Object.freeze(["claudeAiOauth"] as const);
+const RESPONSE_DIAGNOSTIC_KEYCHAIN_CREDENTIAL_SELECTOR = Object.freeze(["claudeAiOauth", "accessToken"] as const);
 const RESPONSE_DIAGNOSTIC_FIVE_HOUR_SELECTOR = Object.freeze(["five_hour"] as const);
 const RESPONSE_DIAGNOSTIC_FIVE_HOUR_UTILIZATION_SELECTOR = Object.freeze(["five_hour", "utilization"] as const);
 const RESPONSE_DIAGNOSTIC_FIVE_HOUR_RESETS_AT_SELECTOR = Object.freeze(["five_hour", "resets_at"] as const);
@@ -186,6 +226,42 @@ const RESPONSE_DIAGNOSTIC_CATALOG_DEFINITIONS: Readonly<
   "claude-code-usage-seven-day-resets-at-invalid": Object.freeze({
     ...RESPONSE_DIAGNOSTIC_ENTRY_RESETS_AT,
     receivedTypeSelector: RESPONSE_DIAGNOSTIC_SEVEN_DAY_RESETS_AT_SELECTOR,
+  }),
+  // Credential-source entries. Code-only where the failure is "absent" or "right type, invalid
+  // value" (no received type can express those); typed where a wrong JSON type is observable.
+  "claude-code-keychain-empty": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-keychain-not-json": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-keychain-root-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_ROOT_SELECTOR,
+  }),
+  "claude-code-keychain-record-missing": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-keychain-record-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_KEYCHAIN_RECORD_SELECTOR,
+  }),
+  "claude-code-keychain-credential-missing": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-keychain-credential-blank": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-keychain-credential-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_CREDENTIAL,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_KEYCHAIN_CREDENTIAL_SELECTOR,
+  }),
+  "claude-code-file-unreadable": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-file-not-json": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-file-root-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_ROOT_SELECTOR,
+  }),
+  "claude-code-file-record-missing": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-file-record-not-object": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_NOT_OBJECT,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_KEYCHAIN_RECORD_SELECTOR,
+  }),
+  "claude-code-file-credential-missing": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-file-credential-blank": RESPONSE_DIAGNOSTIC_ENTRY_NONE,
+  "claude-code-file-credential-invalid": Object.freeze({
+    ...RESPONSE_DIAGNOSTIC_ENTRY_CREDENTIAL,
+    receivedTypeSelector: RESPONSE_DIAGNOSTIC_KEYCHAIN_CREDENTIAL_SELECTOR,
   }),
 } satisfies Readonly<Record<ResponseDiagnosticCode, ResponseDiagnosticCatalogDefinition>>);
 

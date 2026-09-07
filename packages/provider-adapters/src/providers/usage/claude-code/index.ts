@@ -2,7 +2,7 @@ import type { HttpClient as PlatformHttpClient } from "@effect/platform";
 import { Clock, Effect, Option, Redacted, Schema } from "effect";
 
 import type { NormalizedSnapshot, UsageWindowId } from "@ai-workbench/contracts";
-import { MissingCredentials, UnauthorizedExpired } from "@ai-workbench/errors";
+import { MissingCredentials, UnauthorizedExpired, type ResponseDiagnosticInput } from "@ai-workbench/errors";
 import { DEFAULT_HTTP_TIMEOUT_MS, type JsonResponseClassifier } from "@ai-workbench/http";
 import type { ProviderCapabilityMetadata } from "@ai-workbench/provider-registry";
 import type { GovernorBlocked, SchedulerFetchRequest } from "@ai-workbench/scheduler";
@@ -197,7 +197,12 @@ type ClaudeCodeCredentialReasonCode = Extract<ClaudeCodeCredentialResult, { read
  */
 type ClaudeCodeCredentialRead =
   | { readonly ok: true; readonly token: Redacted.Redacted<string>; readonly expiresAt?: number }
-  | { readonly ok: false; readonly reasonCode: ClaudeCodeCredentialReasonCode };
+  | {
+      readonly ok: false;
+      readonly reasonCode: ClaudeCodeCredentialReasonCode;
+      /** Carried through the redaction boundary; it holds no payload value, only a catalog code. */
+      readonly responseDiagnostic?: ResponseDiagnosticInput;
+    };
 
 type ClaudeCodeUsageWindow = "five-hour" | "seven-day" | "fable" | "credit-spend";
 
@@ -284,7 +289,7 @@ export function createClaudeCodeUsageSourceOperation(
       }
       if (!credential.ok) {
         return yield* Effect.fail<AdapterFetchFailure>({
-          failure: missingCredentialsFetchFailure(credential.reasonCode).failure,
+          failure: missingCredentialsFetchFailure(credential.reasonCode, credential.responseDiagnostic).failure,
         });
       }
 
@@ -402,7 +407,11 @@ export const claudeCodeUsageProviderModule = {
 
 function normalizeCredentialRead(result: ClaudeCodeCredentialResult): ClaudeCodeCredentialRead {
   if (!result.ok) {
-    return { ok: false, reasonCode: result.reasonCode };
+    return {
+      ok: false,
+      reasonCode: result.reasonCode,
+      ...(result.responseDiagnostic === undefined ? {} : { responseDiagnostic: result.responseDiagnostic }),
+    };
   }
 
   // Wrap the plain access token in `Redacted` at the instant of the read; the plain string does

@@ -229,6 +229,12 @@ describe("@ai-workbench/errors response diagnostic catalog", () => {
       "claude-code-usage-seven-day-not-object": ["array", "boolean", "null", "number", "string"],
       "claude-code-usage-seven-day-utilization-invalid": ["array", "boolean", "object", "string"],
       "claude-code-usage-seven-day-resets-at-invalid": ["array", "boolean", "null", "number", "object"],
+      "claude-code-keychain-root-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-keychain-record-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-keychain-credential-invalid": ["array", "boolean", "null", "number", "object"],
+      "claude-code-file-root-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-file-record-not-object": ["array", "boolean", "null", "number", "string"],
+      "claude-code-file-credential-invalid": ["array", "boolean", "null", "number", "object"],
     } as const;
 
     for (const [code, definition] of Object.entries(RESPONSE_DIAGNOSTIC_CATALOG)) {

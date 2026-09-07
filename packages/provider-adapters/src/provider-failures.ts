@@ -2,6 +2,7 @@ import type { BalanceProviderId } from "@ai-workbench/contracts";
 import {
   createSanitizedFailure,
   mapProviderFailure,
+  type ResponseDiagnosticInput,
   type SanitizedFailure,
   type SanitizedTaggedError,
 } from "@ai-workbench/errors";
@@ -43,7 +44,10 @@ export function noSourceConfigured(reasonCode: string): SchedulerFetchFailureRes
   };
 }
 
-export function missingCredentialsFetchFailure(reasonCode: string): SchedulerFetchFailureResult {
+export function missingCredentialsFetchFailure(
+  reasonCode: string,
+  responseDiagnostic?: ResponseDiagnosticInput,
+): SchedulerFetchFailureResult {
   return {
     ok: false,
     failure: createSanitizedFailure({
@@ -51,6 +55,9 @@ export function missingCredentialsFetchFailure(reasonCode: string): SchedulerFet
       diagnostics: {
         boundary: "provider-adapters",
         reasonCode,
+        // Only forwarded when present: supplying the key at all makes the sanitizer authoritative
+        // for the emitted reason code, and an absent/invalid diagnostic would collapse it to "unknown".
+        ...(responseDiagnostic === undefined ? {} : { responseDiagnostic }),
       },
       provider: {
         failureClass: "credentials",

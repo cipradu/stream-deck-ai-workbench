@@ -11,7 +11,7 @@ import type {
   UsageProviderId,
   UsageWindowId,
 } from "@ai-workbench/contracts";
-import type { SanitizedFailure } from "@ai-workbench/errors";
+import type { ResponseDiagnosticInput, SanitizedFailure } from "@ai-workbench/errors";
 import type {
   ProviderCapabilityMetadata,
   SourceProofStatus,
@@ -128,7 +128,39 @@ export type ClaudeCodeCredentialResult =
     }
   | {
       readonly ok: false;
-      readonly reasonCode: "claude-code-keychain-denied" | "claude-code-keychain-malformed";
+      /**
+       * One code per distinguishable failure shape, so the emitted log line identifies the cause
+       * instead of collapsing four causes into one.
+       *
+       * `claude-code-keychain-malformed` is now UNREACHABLE — every branch of
+       * `parseClaudeCodeKeychainPayload` returns a specific code. It is retained in the union
+       * only so a stored or in-flight value from a previous build still type-checks; it is not a
+       * fallback and nothing produces it. Remove it once no older build can be running.
+       */
+      readonly reasonCode:
+        | "claude-code-keychain-denied"
+        | "claude-code-keychain-malformed"
+        | "claude-code-keychain-empty"
+        | "claude-code-keychain-not-json"
+        | "claude-code-keychain-root-not-object"
+        | "claude-code-keychain-record-missing"
+        | "claude-code-keychain-record-not-object"
+        | "claude-code-keychain-credential-missing"
+        | "claude-code-keychain-credential-blank"
+        | "claude-code-keychain-credential-invalid"
+        | "claude-code-file-unreadable"
+        | "claude-code-file-not-json"
+        | "claude-code-file-root-not-object"
+        | "claude-code-file-record-missing"
+        | "claude-code-file-record-not-object"
+        | "claude-code-file-credential-missing"
+        | "claude-code-file-credential-blank"
+        | "claude-code-file-credential-invalid";
+      /**
+       * Catalog-derived structural diagnostic (ADR-0027). Carries no value-bearing field; the
+       * central sanitizer promotes its `code` to the emitted `reasonCode`.
+       */
+      readonly responseDiagnostic?: ResponseDiagnosticInput;
     };
 
 export type CodexCredentialResult =

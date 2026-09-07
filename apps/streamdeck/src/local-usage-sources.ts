@@ -3,6 +3,7 @@ import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { ResponseDiagnosticCode } from "@ai-workbench/errors";
 import type {
   ClaudeCodeCredentialResult,
   CodexCredentialResult,
@@ -57,7 +58,7 @@ export type ClaudeCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
   return {
     claudeCode: {
-      readCredential: () => readClaudeCodeKeychainCredential(),
+      readCredential: () => resolveClaudeCodeCredential(),
       refreshCredential: () => refreshClaudeCodeCredential(),
     },
     codex: {
@@ -85,6 +86,128 @@ export async function readClaudeCodeKeychainCredential(
   }
 
   return parseClaudeCodeKeychainPayload(stdout);
+}
+
+/** Credential locations this plugin will read, in default order. Read-only, both of them. */
+export type ClaudeCodeCredentialSource = "keychain" | "file";
+
+/**
+ * Failure codes that are BOTH declarable on the credential result AND registered in the central
+ * diagnostic catalog. The intersection is load-bearing: a code outside the catalog would fail
+ * normalization and collapse the emitted reason code to the literal "unknown".
+ */
+type ClaudeCodeCredentialFailureCode = Extract<ClaudeCodeCredentialResult, { readonly ok: false }>["reasonCode"] &
+  ResponseDiagnosticCode;
+
+/**
+ * Last source that produced a usable credential. In-memory only, by design: persisting a
+ * source pointer would put a credential-derived decision back into global settings, which is
+ * the surface commit 32afdea had to repair. Resets on plugin restart, costing one extra read.
+ *
+ * It is a HINT, never authority — see `resolveClaudeCodeCredential`.
+ */
+let lastGoodClaudeCodeSource: ClaudeCodeCredentialSource | undefined;
+
+/** Test seam. Production never calls this; the hint is owned by resolution. */
+export function __resetClaudeCodeSourceHintForTests(): void {
+  lastGoodClaudeCodeSource = undefined;
+}
+
+export function claudeCodeSourceHintForTests(): ClaudeCodeCredentialSource | undefined {
+  return lastGoodClaudeCodeSource;
+}
+
+/** Honors the documented config-dir override, which relocates the credential file. */
+function claudeCodeCredentialFilePath(environment: NodeJS.ProcessEnv = process.env): string {
+  const configuredDir = environment.CLAUDE_CONFIG_DIR?.trim();
+  return configuredDir !== undefined && configuredDir.length > 0
+    ? join(configuredDir, ".credentials.json")
+    : join(homedir(), ".claude", ".credentials.json");
+}
+
+export async function readClaudeCodeFileCredential(
+  filePath = claudeCodeCredentialFilePath(),
+): Promise<ClaudeCodeCredentialResult> {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch {
+    // Absent or unreadable is an ordinary outcome here, not an error: the vendor only writes
+    // this file when the Keychain rejects a write, so on many machines it legitimately does
+    // not exist.
+    return { ok: false, reasonCode: "claude-code-file-unreadable" };
+  }
+
+  return parseClaudeCodeCredentialPayload(raw, "file");
+}
+
+/**
+ * Resolves a Claude Code credential across every authorized local source.
+ *
+ * TERMINATION — this function cannot loop:
+ *   - the candidate list is fixed and finite (currently two entries);
+ *   - each candidate is read AT MOST ONCE per call, by a single forward `for` loop;
+ *   - there is no recursion, no retry, and no re-entry after a candidate fails;
+ *   - once the list is exhausted the call returns a terminal failure.
+ * A failing source is never revisited within a pass. Recovery across polls is the scheduler's
+ * job (its existing backoff), and the adapter's credential refresh stays one-shot via its own
+ * `recoveryAttempted` guard, which this function does not touch.
+ *
+ * SELECTION — a candidate wins only by being demonstrably usable, never by position:
+ *   - a non-blank, unexpired token returns immediately and records the hint;
+ *   - a non-blank but EXPIRED token does NOT terminate the search. It is retained as a
+ *     last resort and the search continues. Returning it early would let a stale leftover
+ *     pin the hint to a dead source and produce a permanent false "not signed in" — the
+ *     failure class commit 32afdea exists to prevent;
+ *   - if every candidate is exhausted, the latest-expiring retained credential is returned so
+ *     the adapter's existing expiry/refresh handling still runs unchanged;
+ *   - otherwise the first failure encountered is returned, so the log names the source that
+ *     was tried first rather than whichever happened to be last.
+ *
+ * The hint is updated ONLY on success. A pass in which everything fails leaves it untouched,
+ * so two failing sources cannot thrash the ordering between polls.
+ */
+export async function resolveClaudeCodeCredential(
+  readers: {
+    readonly keychain: () => Promise<ClaudeCodeCredentialResult>;
+    readonly file: () => Promise<ClaudeCodeCredentialResult>;
+  } = { keychain: () => readClaudeCodeKeychainCredential(), file: () => readClaudeCodeFileCredential() },
+  now: () => number = () => Date.now(),
+): Promise<ClaudeCodeCredentialResult> {
+  const defaultOrder: readonly ClaudeCodeCredentialSource[] = ["keychain", "file"];
+  const order =
+    lastGoodClaudeCodeSource === undefined
+      ? defaultOrder
+      : [lastGoodClaudeCodeSource, ...defaultOrder.filter((source) => source !== lastGoodClaudeCodeSource)];
+
+  let firstFailure: ClaudeCodeCredentialResult | undefined;
+  let expiredFallback: { readonly source: ClaudeCodeCredentialSource; readonly result: ClaudeCodeCredentialResult } | undefined;
+
+  for (const source of order) {
+    const result = await (source === "keychain" ? readers.keychain() : readers.file());
+
+    if (!result.ok) {
+      firstFailure ??= result;
+      continue;
+    }
+
+    if (result.expiresAt === undefined || result.expiresAt > now()) {
+      lastGoodClaudeCodeSource = source;
+      return result;
+    }
+
+    // Expired: keep the latest-expiring one, but keep looking.
+    if (expiredFallback === undefined || (expiredFallback.result.ok && (expiredFallback.result.expiresAt ?? 0) < result.expiresAt)) {
+      expiredFallback = { source, result };
+    }
+  }
+
+  if (expiredFallback !== undefined) {
+    // Deliberately does NOT set the hint: an expired credential is not a demonstrated success.
+    return expiredFallback.result;
+  }
+
+  return firstFailure ?? { ok: false, reasonCode: "claude-code-file-unreadable" };
 }
 
 export async function refreshClaudeCodeCredential(
@@ -121,24 +244,114 @@ export async function refreshClaudeCodeCredential(
   }
 }
 
-/** Pure parse of the Keychain payload (`.claudeAiOauth.{accessToken, expiresAt}`); never logs contents. */
+/**
+ * Pure parse of the Keychain payload (`.claudeAiOauth.{accessToken, expiresAt}`); never logs contents.
+ *
+ * Each failure shape returns its own catalog code so the emitted log line names the actual cause.
+ * A single collapsed code previously made "the store returned nothing", "the store returned
+ * non-JSON", "the container is gone" and "the token is blank" indistinguishable from the log,
+ * which is exactly the state that forced a live Keychain/filesystem investigation.
+ * Codes are value-free: they name the static path, never the payload (ADR-0027).
+ */
 export function parseClaudeCodeKeychainPayload(stdout: string): ClaudeCodeCredentialResult {
-  const parsed = parseJsonRecord(stdout.trim());
-  const oauth = parsed === undefined ? undefined : recordProperty(parsed, "claudeAiOauth");
-  const accessToken = oauth === undefined ? undefined : oauth.accessToken;
-  if (typeof accessToken !== "string" || accessToken.trim().length === 0) {
-    return {
-      ok: false,
-      reasonCode: "claude-code-keychain-malformed",
-    };
+  return parseClaudeCodeCredentialPayload(stdout, "keychain");
+}
+
+/**
+ * One validated edge for both sources. The shape is the same, but the emitted code names the
+ * SOURCE as well as the failure, because resolution reads both and "blank token" alone would
+ * not tell an operator which store is degraded.
+ *
+ * The file payload is validated independently rather than trusted to match the Keychain's
+ * shape: both are undocumented vendor internals with no stability commitment.
+ */
+export function parseClaudeCodeCredentialPayload(
+  raw: string,
+  source: ClaudeCodeCredentialSource,
+): ClaudeCodeCredentialResult {
+  const code = <S extends string>(suffix: S) => `claude-code-${source}-${suffix}` as ClaudeCodeCredentialFailureCode;
+
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    // The file source reports an empty file as unreadable: an empty file and an absent file are
+    // the same actionable condition there, whereas for the Keychain an empty read is distinct.
+    return failedKeychainRead(source === "keychain" ? "claude-code-keychain-empty" : "claude-code-file-unreadable");
   }
 
-  const expiresAt = typeof oauth?.expiresAt === "number" ? oauth.expiresAt : undefined;
+  const root = parseJsonValue(trimmed);
+  if (root === undefined) {
+    return failedKeychainRead(code("not-json"));
+  }
+  if (!isPlainObject(root)) {
+    return failedKeychainRead(code("root-not-object"), jsonTypeOf(root));
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(root, "claudeAiOauth")) {
+    return failedKeychainRead(code("record-missing"));
+  }
+  const oauth = (root as Record<string, unknown>).claudeAiOauth;
+  if (!isPlainObject(oauth)) {
+    return failedKeychainRead(code("record-not-object"), jsonTypeOf(oauth));
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(oauth, "accessToken")) {
+    return failedKeychainRead(code("credential-missing"));
+  }
+  const accessToken = (oauth as Record<string, unknown>).accessToken;
+  if (typeof accessToken !== "string") {
+    return failedKeychainRead(code("credential-invalid"), jsonTypeOf(accessToken));
+  }
+  if (accessToken.trim().length === 0) {
+    return failedKeychainRead(code("credential-blank"));
+  }
+
+  const expiresAtRaw = (oauth as Record<string, unknown>).expiresAt;
+  const expiresAt = typeof expiresAtRaw === "number" ? expiresAtRaw : undefined;
   return {
     ok: true,
     accessToken,
     ...(expiresAt === undefined ? {} : { expiresAt }),
   };
+}
+
+/**
+ * Builds the failure result and its catalog diagnostic together, so a code that declares an
+ * expected type can never be emitted without its received type. Emitting that pair mismatched
+ * would make the central sanitizer reject the diagnostic and downgrade the logged reason code to
+ * the literal "unknown" — strictly worse than the collapsed code this change removes.
+ */
+function failedKeychainRead(
+  // Intersected with the catalog's own code union, so a reason code that has no catalog entry
+  // (`-denied`, the legacy `-malformed`) cannot reach the diagnostic and be rejected at runtime.
+  code: ClaudeCodeCredentialFailureCode,
+  receivedType?: "array" | "boolean" | "null" | "number" | "object" | "string",
+): ClaudeCodeCredentialResult {
+  return {
+    ok: false,
+    reasonCode: code,
+    responseDiagnostic: receivedType === undefined ? { code } : { code, receivedType },
+  };
+}
+
+/** Parses any JSON value (not only an object); `undefined` means the text is not JSON at all. */
+function parseJsonValue(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Closed JSON type label matching the central catalog's received-type set. */
+function jsonTypeOf(value: unknown): "array" | "boolean" | "null" | "number" | "object" | "string" {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  const t = typeof value;
+  return t === "boolean" || t === "number" || t === "string" || t === "object" ? t : "string";
 }
 
 export async function readCodexAuthJsonCredential(authPath = DEFAULT_CODEX_AUTH_PATH): Promise<CodexCredentialResult> {
