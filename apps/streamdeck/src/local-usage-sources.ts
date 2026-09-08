@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
+
+import { Option, Redacted, Schema } from "effect";
 
 import type { ResponseDiagnosticCode } from "@ai-workbench/errors";
 import type {
@@ -11,6 +13,8 @@ import type {
   KimiCodeCredentialResult,
   UsageProviderLocalSourceReaders,
 } from "@ai-workbench/provider-adapters";
+
+import { ClaudeCodeRefreshPayloadSchema } from "./local-usage-sources.schema.js";
 
 const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const DEFAULT_CLAUDE_CODE_EXECUTABLE = join(homedir(), ".local", "bin", "claude");
@@ -55,17 +59,21 @@ export type KimiCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 export type ClaudeCodeRefreshCommand = UsageCredentialRefreshCommand;
 export type ClaudeCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 
+export interface ClaudeCodeRefreshSourceReaders {
+  readonly keychain: () => Promise<string>;
+  readonly file: (filePath: string) => Promise<string>;
+}
+
+const defaultClaudeCodeRefreshSourceReaders: ClaudeCodeRefreshSourceReaders = {
+  keychain: () => execFileText("security", ["find-generic-password", "-s", DEFAULT_CLAUDE_KEYCHAIN_SERVICE, "-w"]),
+  file: (filePath) => readFile(filePath, "utf8"),
+};
+const decodeClaudeCodeRefreshPayload = Schema.decodeUnknownOption(ClaudeCodeRefreshPayloadSchema);
+type ClaudeCodeRefreshMaterial = typeof ClaudeCodeRefreshPayloadSchema.Type.claudeAiOauth;
+
 /**
- * `refreshCredential` asks the vendor CLI to refresh its own credential. That is the ONLY recovery
- * path available — there is no supported force-refresh command, and the plugin must not perform the
- * OAuth grant itself (refresh tokens rotate; racing the user's own CLI can sign them out).
- *
- * It is routed through {@link singleFlightRefresh} because an unserialized refresh is destructive:
- * refresh tokens rotate, so concurrent refreshes are guaranteed to fail for every flight but the
- * first, and the CLI blanks the whole credential store on a failed refresh (measured:
- * `accessToken: ""`, `refreshToken: ""`, `expiresAt: 0`). With four Claude keys polling together
- * that turned one expired token into a signed-out user, and matches the blanked local Keychain
- * item. Serializing means N keys cause exactly one refresh, which is the case that can succeed.
+ * Vendor CLIs own credential renewal and storage. The plugin only reads existing local
+ * material and joins concurrent recovery requests through one per-provider refresh gate.
  */
 export function createLocalUsageSourceReaders(): UsageProviderLocalSourceReaders {
   return {
@@ -223,19 +231,8 @@ export async function resolveClaudeCodeCredential(
 }
 
 /**
- * Serializes credential refreshes so concurrent keys can never race each other.
- *
- * OAuth refresh tokens ROTATE: the first refresh to land invalidates the token every other
- * in-flight refresh is still holding, so those are guaranteed to fail — and the vendor CLI blanks
- * the whole credential store when a refresh fails (measured: `accessToken: ""`, `refreshToken: ""`,
- * `expiresAt: 0`). Four Claude keys polling together therefore turned one expired token into a
- * signed-out user. Observed in the outage log: 3 flights ending in the same second (18:53:22,
- * elapsedMs 3501/2883/2537).
- *
- * Every caller for a provider shares ONE underlying refresh and awaits the same promise, so N keys
- * cause exactly one subprocess. `cooldownUntilMs` then holds off further attempts after a FAILED
- * refresh, so a genuinely broken credential is not re-attacked on every poll — without it, a
- * refresh that fails for any reason would be retried by every key on every cycle.
+ * Concurrent callers for a provider await one refresh operation. A failed operation starts
+ * a cooldown so later polls cannot repeatedly invoke the same failing recovery command.
  */
 interface RefreshGate {
   inFlight: Promise<void> | undefined;
@@ -250,9 +247,7 @@ function singleFlightRefresh(gate: RefreshGate, perform: () => Promise<void>, no
     return gate.inFlight;
   }
   if (now() < gate.cooldownUntilMs) {
-    // Still cooling down from a failed refresh. Report failure WITHOUT spawning, so the adapter
-    // surfaces `*-credential-refresh-failed` instead of re-running a subprocess that can blank
-    // the store again.
+    // Preserve the adapter's sanitized refresh-failure path without another subprocess.
     return Promise.reject(new Error("credential refresh is cooling down after a prior failure"));
   }
   const flight = perform()
@@ -274,10 +269,11 @@ export async function refreshClaudeCodeCredential(
   runCommand: ClaudeCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
   now: () => number = () => Date.now(),
+  readers: ClaudeCodeRefreshSourceReaders = defaultClaudeCodeRefreshSourceReaders,
 ): Promise<void> {
   return singleFlightRefresh(
     claudeCodeRefreshGate,
-    () => performClaudeCodeRefresh(runCommand, sourceEnvironment),
+    () => performClaudeCodeRefresh(runCommand, sourceEnvironment, readers),
     now,
   );
 }
@@ -285,9 +281,27 @@ export async function refreshClaudeCodeCredential(
 async function performClaudeCodeRefresh(
   runCommand: ClaudeCodeRefreshCommandRunner,
   sourceEnvironment: NodeJS.ProcessEnv,
+  readers: ClaudeCodeRefreshSourceReaders,
 ): Promise<void> {
+  const refreshEnvironment = sanitizedUsageRefreshEnvironment(sourceEnvironment);
+  const material = await resolveClaudeCodeRefreshMaterial(readers, refreshEnvironment);
   const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-claude-refresh-"));
   try {
+    if (material !== undefined) {
+      await runCommand({
+        command: DEFAULT_CLAUDE_CODE_EXECUTABLE,
+        args: ["auth", "login"],
+        cwd: isolatedRoot,
+        env: {
+          ...refreshEnvironment,
+          CLAUDE_CODE_OAUTH_REFRESH_TOKEN: Redacted.value(material.refreshToken),
+          CLAUDE_CODE_OAUTH_SCOPES: material.scopes.join(" "),
+        },
+        timeoutMs: USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS,
+        maxBufferBytes: USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES,
+      });
+      return;
+    }
     await runCommand({
       command: DEFAULT_CLAUDE_CODE_EXECUTABLE,
       args: [
@@ -307,13 +321,43 @@ async function performClaudeCodeRefresh(
         "text",
       ],
       cwd: isolatedRoot,
-      env: sanitizedUsageRefreshEnvironment(sourceEnvironment),
+      env: refreshEnvironment,
       timeoutMs: USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS,
       maxBufferBytes: USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES,
     });
   } finally {
     await rm(isolatedRoot, { recursive: true, force: true });
   }
+}
+
+async function resolveClaudeCodeRefreshMaterial(
+  readers: ClaudeCodeRefreshSourceReaders,
+  environment: NodeJS.ProcessEnv,
+): Promise<ClaudeCodeRefreshMaterial | undefined> {
+  const configuredDir = environment.CLAUDE_CONFIG_DIR;
+  if (configuredDir !== undefined && (!isAbsolute(configuredDir) || configuredDir !== configuredDir.trim() || configuredDir !== normalize(configuredDir))) {
+    // The isolated child must resolve exactly the same directory as this read boundary.
+    return undefined;
+  }
+  let selected: ClaudeCodeRefreshMaterial | undefined;
+  const readCredentialFile = () => readers.file(claudeCodeCredentialFilePath(environment));
+  // Custom directories have separate vendor Keychain entries; never borrow the default login.
+  const sources = configuredDir === undefined ? [readers.keychain, readCredentialFile] : [readCredentialFile];
+  for (const read of sources) {
+    let raw: string;
+    try {
+      raw = await read();
+    } catch {
+      // An unavailable store may still have a usable peer. Never retain the raw read error.
+      continue;
+    }
+    const decoded = Option.getOrUndefined(decodeClaudeCodeRefreshPayload(parseJsonValue(raw)));
+    const candidate = decoded?.claudeAiOauth;
+    if (candidate !== undefined && (selected === undefined || (candidate.expiresAt ?? 0) > (selected.expiresAt ?? 0))) {
+      selected = candidate;
+    }
+  }
+  return selected;
 }
 
 /**
