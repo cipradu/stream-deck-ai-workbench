@@ -894,6 +894,207 @@ describe("zai-coding-plan Effect-native usage adapter", () => {
     expect(result).not.toHaveProperty("snapshot");
   });
 
+  // The live-verified outage envelope (owner probe 2026-09-17): HTTP 200, no `data` key,
+  // the vendor's own 500 carried in the body. Before this mapping a provider outage was
+  // reported as our own schema drift and backed off on the slower rate-limit cadence.
+  it("maps a vendor 5xx carried inside a 200 body to provider-unavailable, not validation drift", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, { code: 500, msg: "Internal service error", success: false }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        displayState: "provider-unavailable",
+        retryClass: "transient-retry",
+        provider: { reasonCode: "usage-zai-vendor-status-error" },
+        // The exact code rides here, NOT interpolated into the reason code: the logging
+        // boundary redacts any reason code carrying both a metric label and a number.
+        diagnostics: { httpStatus: 500, httpStatusClass: "5xx" },
+      },
+    });
+    expect(result).not.toHaveProperty("snapshot");
+  });
+
+  it("never carries the vendor error message across the sanitized boundary", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, { code: 500, msg: "Internal service error", success: false }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(JSON.stringify(result)).not.toContain("Internal service error");
+  });
+
+  it("maps an in-body auth code through the same shared HTTP-status classification", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, { code: 401, msg: "Credential expired or incorrect", success: false }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { displayState: "unauthorized-expired", provider: { reasonCode: "usage-zai-vendor-status-error" } },
+    });
+  });
+
+  it("reports an undocumented four-digit business code without guess-mapping its category", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, { code: 1113, msg: "Insufficient balance", success: false }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        displayState: "unknown-sanitized-failure",
+        provider: { reasonCode: "zai-vendor-business-error-1113" },
+      },
+    });
+  });
+
+  it("still rejects a body carrying neither data nor a vendor code as validation drift", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(captured, respondJson(200, { unexpected: "shape" }));
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { displayState: "validation-drift", provider: { reasonCode: "usage-zai-response-shape-unrecognized" } },
+    });
+  });
+
+  // The credits plan relabels the same (unit, number) triples; accounts migrate at their own
+  // billing-cycle boundary, so both labels must resolve or the key blanks the day it migrates.
+  it("resolves CREDIT_LIMIT triples from the migrated credits plan", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, {
+        code: 200,
+        success: true,
+        data: {
+          limits: [
+            { type: "CREDIT_LIMIT", unit: 3, number: 5, percentage: 42, nextResetTime: 4_000_000 },
+            { type: "CREDIT_LIMIT", unit: 6, number: 1, percentage: 71 },
+          ],
+          level: "lite",
+        },
+      }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: { coverage: { kind: "rolling-window", window: "five-hour" }, value: 42, resetsAtEpochMs: 4_000_000 },
+    });
+  });
+
+  // The vendor's SUCCESS code on this endpoint is 200, so a 2xx body code must never be routed
+  // through the HTTP-status classifier — that would emit `httpStatus: 200, httpStatusClass: "2xx"`
+  // on a request whose status line really was 200, i.e. an HTTP failure that did not happen.
+  it("does not classify a data-less 2xx body code as an HTTP-status failure", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(captured, respondJson(200, { code: 200, success: true }));
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        displayState: "unknown-sanitized-failure",
+        provider: { reasonCode: "zai-vendor-business-error-200" },
+      },
+    });
+    if (!result.ok) {
+      expect(result.failure.diagnostics).not.toHaveProperty("httpStatus");
+      expect(result.failure.diagnostics).not.toHaveProperty("httpStatusClass");
+    }
+  });
+
+  // The fix must key on the fault code, not only on `data` being absent: the vendor may report a
+  // fault while still sending an envelope. Without this the same outage would fall back to the
+  // slow rate-limit cadence purely because `data` happened to be present.
+  it("classifies a vendor fault code even when the envelope still carries data", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(
+      captured,
+      respondJson(200, { code: 500, success: false, data: { limits: [] } }),
+    );
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: {
+        displayState: "provider-unavailable",
+        retryClass: "transient-retry",
+        provider: { reasonCode: "usage-zai-vendor-status-error" },
+      },
+    });
+  });
+
+  // Pre-existing behavior must survive the branch above: no fault code means the old semantic
+  // validation failure, not a vendor-fault classification.
+  it("still reports a bare success:false envelope as the semantic validation failure", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(captured, respondJson(200, { code: 200, success: false, data: { limits: [] } }));
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { displayState: "validation-drift", provider: { reasonCode: "usage-zai-success-flag-false" } },
+    });
+  });
+
+  // A migrating account can report one window under BOTH labels. First-array-match would let
+  // vendor ordering decide which percentage the key renders — two different numbers, silently.
+  it("selects the credits entry deterministically when both labels describe the same window", async () => {
+    const bothLabels = (first: "TOKENS_LIMIT" | "CREDIT_LIMIT") => ({
+      success: true,
+      data: {
+        limits: [
+          { type: first, unit: 3, number: 5, percentage: first === "CREDIT_LIMIT" ? 88 : 12 },
+          { type: first === "CREDIT_LIMIT" ? "TOKENS_LIMIT" : "CREDIT_LIMIT", unit: 3, number: 5, percentage: first === "CREDIT_LIMIT" ? 12 : 88 },
+        ],
+      },
+    });
+
+    for (const first of ["TOKENS_LIMIT", "CREDIT_LIMIT"] as const) {
+      const captured: HttpClientRequest.HttpClientRequest[] = [];
+      const runFetch = zaiEffectSourceFetch(captured, respondJson(200, bothLabels(first)));
+
+      const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+      // 88 is the CREDIT_LIMIT value in both orderings.
+      expect(result).toMatchObject({ ok: true, snapshot: { value: 88 } });
+    }
+  });
+
+  it("keeps resolving legacy TOKENS_LIMIT triples after the credits label was accepted", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = zaiEffectSourceFetch(captured, respondJson(200, zaiQuotaBody));
+
+    const result = await runFetch(usageRequest("zai-coding-plan", "five-hour"));
+
+    expect(result).toMatchObject({ ok: true, snapshot: { value: 12 } });
+  });
+
   it("maps a credential-resolution failure to a sanitized failure without any HTTP call", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     const effectFetch = zaiCodingPlanUsageProviderModule.createSourceFetchEffect({

@@ -9,6 +9,12 @@ export {
 export { createBalanceProviderSourceFetchEffect } from "./providers/balance/index.js";
 export { createStatusProviderSourceFetchEffect } from "./providers/status/index.js";
 export { createUsageProviderSourceFetchEffect } from "./providers/usage/index.js";
+// Exported so the log-sanitizer guard in `apps/streamdeck` asserts the REAL emitted reason
+// codes. `provider-adapters` cannot import `logging`, so the guard cannot live here.
+export {
+  ZAI_USAGE_REASON_CODES,
+  __zaiVendorBusinessErrorReasonForTests,
+} from "./providers/usage/zai-coding-plan/index.js";
 export {
   createSourceGatedBalanceFetch,
   createSourceGatedBalanceFetchEffect,

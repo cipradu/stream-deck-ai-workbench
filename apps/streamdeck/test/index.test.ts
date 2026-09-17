@@ -23,6 +23,7 @@ import {
 } from "@ai-workbench/display";
 import { createSanitizedFailure, RESPONSE_DIAGNOSTIC_CATALOG } from "@ai-workbench/errors";
 import { sanitizeLogContext, type SanitizedLogEvent, type StreamDeckLogSink } from "@ai-workbench/logging";
+import { ZAI_USAGE_REASON_CODES, __zaiVendorBusinessErrorReasonForTests } from "@ai-workbench/provider-adapters";
 import type {
   Scheduler,
   SchedulerActivateInput,
@@ -2903,6 +2904,45 @@ describe("local usage source parsing (read-only stores)", () => {
     for (const code of Object.keys(RESPONSE_DIAGNOSTIC_CATALOG)) {
       expect(sanitizeLogContext({ reasonCode: code }).reasonCode).toBe(code);
     }
+  });
+
+  it("keeps the z.ai adapter's REAL reason codes readable through the REAL log sanitizer", () => {
+    // Live regression seam (vendor outage 2026-09-17): z.ai answers business errors with HTTP
+    // 200 and its own `{code, msg, success:false}` envelope, so the adapter classifies from the
+    // body code. The first version of that fix interpolated the number into the reason code and
+    // the deployed plugin logged `reasonCode: "redacted"` — `containsProviderMetricValue` ANDs a
+    // metric-label test with a numeric test, and EVERY Usage reason code already carries the
+    // label "usage". That turned a correct classification into an unreadable log line and
+    // falsely implied a secret was present.
+    //
+    // The values below are IMPORTED from the adapter, never retyped. A guard asserting its own
+    // copies of the strings passes happily after a rename while the deployed plugin silently
+    // reships the defect — the same copy-of-the-rule trap the catalog guard above warns about.
+    for (const code of Object.values(ZAI_USAGE_REASON_CODES)) {
+      expect(sanitizeLogContext({ reasonCode: code }).reasonCode).toBe(code);
+    }
+
+    // The business-error code MUST carry the vendor's number: no structured diagnostic channel
+    // can hold it (`httpStatus` admits only 100-599, `issueCount`/`fieldPaths` never reach the
+    // log), so losing it makes "insufficient balance" indistinguishable from any other fault.
+    for (const vendorCode of [1113, 1210, 1261, 1309, 9999]) {
+      const reasonCode = __zaiVendorBusinessErrorReasonForTests(vendorCode);
+      expect(reasonCode).toContain(String(vendorCode));
+      expect(sanitizeLogContext({ reasonCode }).reasonCode).toBe(reasonCode);
+    }
+    const nonInteger = __zaiVendorBusinessErrorReasonForTests(Number.POSITIVE_INFINITY);
+    expect(sanitizeLogContext({ reasonCode: nonInteger }).reasonCode).toBe(nonInteger);
+
+    // Pins the mechanism the guard exists for: re-add a metric label next to a number and the
+    // whole code is destroyed. This is why the business code drops the "usage-" family prefix.
+    expect(sanitizeLogContext({ reasonCode: "usage-zai-vendor-error-500" }).reasonCode).toBe("redacted");
+    expect(sanitizeLogContext({ reasonCode: "usage-zai-vendor-business-error-1113" }).reasonCode).toBe("redacted");
+
+    // For the HTTP-status route the number is not lost either — it rides in the structured
+    // field that is allowed to carry numbers.
+    expect(
+      sanitizeLogContext({ reasonCode: ZAI_USAGE_REASON_CODES.vendorStatusError, httpStatus: 500 }),
+    ).toMatchObject({ reasonCode: ZAI_USAGE_REASON_CODES.vendorStatusError, httpStatus: 500 });
   });
 
   it("carries every Keychain failure through to a log line an operator can read", () => {
