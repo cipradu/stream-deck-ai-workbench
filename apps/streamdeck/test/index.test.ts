@@ -84,11 +84,6 @@ const RAW_NEEDLES = {
   token: "Bearer fixture-token-value",
 } as const;
 
-const noClaudeRefreshMaterial = {
-  keychain: async () => "",
-  file: async () => "",
-};
-
 const balanceSettings = {
   familyId: "balance",
   providerId: "fal",
@@ -3279,7 +3274,15 @@ describe("local usage source parsing (read-only stores)", () => {
   });
 
   it("runs Claude refresh through Haiku with low effort and isolated bounded process options", async () => {
-    let isolatedRoot: string | undefined;
+    let isolatedRoot = "";
+    const environment = Object.freeze({
+      PATH: "/fixture/system/path",
+      SAFE_RUNTIME_MARKER: "preserved",
+      ANTHROPIC_API_KEY: "fixture-secret-must-not-reach-child",
+      CLAUDE_CODE_OAUTH_TOKEN: "fixture-token-must-not-reach-child",
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "fixture-refresh-must-not-reach-child",
+      CLAUDE_CODE_OAUTH_SCOPES: "fixture:inherited",
+    });
     await refreshClaudeCodeCredential(async (command) => {
       isolatedRoot = command.cwd;
       expect(command.command).toBe(join(homedir(), ".local", "bin", "claude"));
@@ -3302,231 +3305,52 @@ describe("local usage source parsing (read-only stores)", () => {
       expect(command.cwd).toMatch(/ai-workbench-claude-refresh-/);
       expect(command.timeoutMs).toBe(60_000);
       expect(command.maxBufferBytes).toBe(16 * 1024);
-      expect(command.env).toMatchObject({
+      expect(await readdir(command.cwd)).toEqual([]);
+      expect(command.env).toEqual({
         HOME: homedir(),
         NO_COLOR: "1",
+        PATH: "/fixture/system/path",
         SAFE_RUNTIME_MARKER: "preserved",
       });
       expect(command.env).not.toHaveProperty("ANTHROPIC_API_KEY");
       expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
-    }, {
-      PATH: "/fixture/system/path",
-      SAFE_RUNTIME_MARKER: "preserved",
-      ANTHROPIC_API_KEY: "fixture-secret-must-not-reach-child",
-      CLAUDE_CODE_OAUTH_TOKEN: "fixture-token-must-not-reach-child",
-    }, () => Date.now(), noClaudeRefreshMaterial);
-    expect(isolatedRoot).toBeDefined();
-    await expect(readdir(isolatedRoot!)).rejects.toBeDefined();
-  });
-
-  it("recovers Claude with file refresh material when the Keychain record is blank", async () => {
-    let isolatedRoot = "";
-    const environment = {
-      SAFE_RUNTIME_MARKER: "preserved",
-      ANTHROPIC_API_KEY: "fixture-unrelated-secret",
-      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "fixture-inherited-refresh",
-      CLAUDE_CODE_OAUTH_SCOPES: "fixture:inherited",
-    };
-    await refreshClaudeCodeCredential(async (command) => {
-      isolatedRoot = command.cwd;
-      expect(command.command).toBe(join(homedir(), ".local", "bin", "claude"));
-      expect(command.args).toEqual(["auth", "login"]);
-      expect(command.env).toEqual({
-        HOME: homedir(),
-        NO_COLOR: "1",
-        SAFE_RUNTIME_MARKER: "preserved",
-        CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "fixture-file-refresh",
-        CLAUDE_CODE_OAUTH_SCOPES: "user:profile user:inference",
-      });
-      expect(command.timeoutMs).toBe(60_000);
-      expect(command.maxBufferBytes).toBe(16 * 1024);
-      expect(await readdir(command.cwd)).toEqual([]);
-    }, environment, () => Date.now(), {
-      keychain: async () => JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }),
-      file: async () => JSON.stringify({ claudeAiOauth: {
-        accessToken: "fixture-expired-access",
-        refreshToken: "fixture-file-refresh",
-        expiresAt: 1,
-        scopes: ["user:profile", "user:inference"],
-      } }),
-    });
-    expect(environment.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("fixture-inherited-refresh");
-    await expect(readdir(isolatedRoot)).rejects.toBeDefined();
-  });
-
-  it.each([
-    { keychainExpiry: 20, fileExpiry: 10, expected: "keychain" },
-    { keychainExpiry: 10, fileExpiry: 20, expected: "file" },
-    { keychainExpiry: 20, fileExpiry: 20, expected: "keychain" },
-    { keychainExpiry: undefined, fileExpiry: 20, expected: "file" },
-  ])("selects freshest eligible Claude refresh material: $keychainExpiry / $fileExpiry", async ({ keychainExpiry, fileExpiry, expected }) => {
-    const scopes = ["user:inference", "user:profile", "user:inference"];
-    await refreshClaudeCodeCredential(async (command) => {
-      expect(command.args).toEqual(["auth", "login"]);
-      expect(command.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe(`fixture-${expected}-refresh`);
-      expect(command.env.CLAUDE_CODE_OAUTH_SCOPES).toBe(scopes.join(" "));
-    }, {}, () => Date.now(), {
-      keychain: async () => JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-keychain-refresh", scopes, expiresAt: keychainExpiry } }),
-      file: async () => JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-file-refresh", scopes, expiresAt: fileExpiry } }),
-    });
-  });
-
-  it.each([
-    { label: "missing token", oauth: { scopes: ["user:profile"] } },
-    { label: "blank token", oauth: { refreshToken: " \t", scopes: ["user:profile"] } },
-    { label: "non-string token", oauth: { refreshToken: 123, scopes: ["user:profile"] } },
-    { label: "NUL token", oauth: { refreshToken: "fixture\0refresh", scopes: ["user:profile"] } },
-    { label: "missing scopes", oauth: { refreshToken: "fixture-refresh" } },
-    { label: "empty scopes", oauth: { refreshToken: "fixture-refresh", scopes: [] } },
-    { label: "non-array scopes", oauth: { refreshToken: "fixture-refresh", scopes: "user:profile" } },
-    { label: "non-string scope", oauth: { refreshToken: "fixture-refresh", scopes: [123] } },
-    { label: "empty scope", oauth: { refreshToken: "fixture-refresh", scopes: [""] } },
-    { label: "space in scope", oauth: { refreshToken: "fixture-refresh", scopes: ["user:profile user:inference"] } },
-    { label: "newline in scope", oauth: { refreshToken: "fixture-refresh", scopes: ["user:profile\n"] } },
-    { label: "NUL in scope", oauth: { refreshToken: "fixture-refresh", scopes: ["user:profile\0"] } },
-    { label: "malformed expiry", oauth: { refreshToken: "fixture-refresh", scopes: ["user:profile"], expiresAt: "yesterday" } },
-  ])("falls back to bounded Haiku recovery for Claude $label", async ({ oauth }) => {
-    let calls = 0;
-    await refreshClaudeCodeCredential(async (command) => {
-      calls += 1;
-      expect(command.args).toContain("--safe-mode");
-      expect(command.args).toContain("haiku");
       expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
       expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_SCOPES");
-    }, {
-      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "fixture-inherited-refresh",
-      CLAUDE_CODE_OAUTH_SCOPES: "user:inference",
-    }, () => Date.now(), {
-      keychain: async () => JSON.stringify({ claudeAiOauth: oauth }),
-      file: async () => "{malformed-json",
-    });
-    expect(calls).toBe(1);
+    }, environment);
+    expect(environment.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("fixture-refresh-must-not-reach-child");
+    await expect(readdir(isolatedRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("never reads default Keychain refresh material for a custom Claude context", async () => {
-    let keychainReads = 0;
+  it.each([join(tmpdir(), "fixture-claude-config"), "fixture-relative", " /tmp/fixture-custom", "/tmp/fixture-custom ", "", "   ", "/tmp/fixture-custom/../other"])("preserves the configured Claude context for normal CLI renewal: %j", async (configDir) => {
     const commands: ClaudeCodeRefreshCommand[] = [];
-    const configDir = join(tmpdir(), "fixture-claude-config");
-    await refreshClaudeCodeCredential(async (command) => {
-      commands.push(command);
-    }, { CLAUDE_CONFIG_DIR: configDir }, () => Date.now(), {
-      keychain: async () => {
-        keychainReads += 1;
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-default-refresh", scopes: ["user:inference"], expiresAt: 999_999 } });
-      },
-      file: async (path) => {
-        expect(path).toBe(join(configDir, ".credentials.json"));
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-custom-refresh", scopes: ["user:profile"], expiresAt: 1 } });
-      },
-    });
-    expect(keychainReads).toBe(0);
-    expect(commands).toHaveLength(1);
-    expect(commands[0]?.args).toEqual(["auth", "login"]);
-    expect(commands[0]?.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("fixture-custom-refresh");
-    expect(commands[0]?.env.CLAUDE_CODE_OAUTH_SCOPES).toBe("user:profile");
-    expect(commands[0]?.env.CLAUDE_CONFIG_DIR).toBe(configDir);
-  });
-
-  it.each(["unavailable", "malformed"])("uses Haiku when the custom Claude file is %s despite eligible default material", async (fileState) => {
-    let keychainReads = 0;
-    const commands: ClaudeCodeRefreshCommand[] = [];
-    const configDir = join(tmpdir(), "fixture-claude-config");
-    await refreshClaudeCodeCredential(async (command) => { commands.push(command); }, {
-      CLAUDE_CONFIG_DIR: configDir,
-    }, () => Date.now(), {
-      keychain: async () => {
-        keychainReads += 1;
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-default-refresh", scopes: ["user:inference"], expiresAt: 999_999 } });
-      },
-      file: async () => {
-        if (fileState === "unavailable") throw new Error("fixture-file-unavailable");
-        return "{malformed-json";
-      },
-    });
-    expect(keychainReads).toBe(0);
-    expect(commands).toHaveLength(1);
-    expect(commands[0]?.args).toContain("haiku");
-    expect(commands[0]?.env.CLAUDE_CONFIG_DIR).toBe(configDir);
-    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
-    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_SCOPES");
-  });
-
-  it.each(["fixture-relative", " /tmp/fixture-custom", "/tmp/fixture-custom ", "", "   ", "/tmp/fixture-custom/../other"])("uses Haiku without local refresh reads for ambiguous Claude context %j", async (configDir) => {
-    let reads = 0;
-    const commands: ClaudeCodeRefreshCommand[] = [];
-    const read = async () => {
-      reads += 1;
-      return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", scopes: ["user:inference"] } });
-    };
-    await refreshClaudeCodeCredential(async (command) => { commands.push(command); }, {
-      CLAUDE_CONFIG_DIR: configDir,
-    }, () => Date.now(), { keychain: read, file: read });
-    expect(reads).toBe(0);
-    expect(commands).toHaveLength(1);
-    expect(commands[0]?.args).toContain("haiku");
-    expect(commands[0]?.env.CLAUDE_CONFIG_DIR).toBe(configDir);
-    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
-    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_SCOPES");
-  });
-
-  it("keeps the Claude child context paired with its source throughout asynchronous reads", async () => {
-    const configDir = join(tmpdir(), "fixture-claude-config");
     const environment = { CLAUDE_CONFIG_DIR: configDir };
-    const commands: ClaudeCodeRefreshCommand[] = [];
-    await refreshClaudeCodeCredential(async (command) => { commands.push(command); }, environment, () => Date.now(), {
-      keychain: noClaudeRefreshMaterial.keychain,
-      file: async (path) => {
-        expect(path).toBe(join(configDir, ".credentials.json"));
-        environment.CLAUDE_CONFIG_DIR = join(tmpdir(), "fixture-other-context");
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-custom-refresh", scopes: ["user:inference"] } });
-      },
-    });
+    const flight = refreshClaudeCodeCredential(async (command) => { commands.push(command); }, environment);
+    environment.CLAUDE_CONFIG_DIR = join(tmpdir(), "fixture-other-context");
+    await flight;
     expect(commands).toHaveLength(1);
-    expect(commands[0]?.args).toEqual(["auth", "login"]);
+    expect(commands[0]?.args).toContain("haiku");
     expect(commands[0]?.env.CLAUDE_CONFIG_DIR).toBe(configDir);
-    expect(commands[0]?.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("fixture-custom-refresh");
+    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
+    expect(commands[0]?.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_SCOPES");
   });
 
-  it("reads the default Claude file when Keychain is unavailable and ignores ineligible newer material", async () => {
-    const sources = {
-      keychain: async () => { throw new Error("fixture-private-read-error"); },
-      file: async (path: string) => {
-        expect(path).toBe(join(homedir(), ".claude", ".credentials.json"));
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-file-refresh", scopes: ["user:inference"] } });
-      },
-    };
-    const runner = async (command: ClaudeCodeRefreshCommand) => {
-      expect(command.args).toEqual(["auth", "login"]);
-      expect(command.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
-      expect(command.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("fixture-file-refresh");
-    };
-    await refreshClaudeCodeCredential(runner, {}, () => Date.now(), sources);
-    await refreshClaudeCodeCredential(runner, {}, () => Date.now(), {
-      ...sources,
-      keychain: async () => JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-ineligible", scopes: [], expiresAt: 999_999 } }),
-    });
-  });
-
-  it("does not retry or fall through to browser login or Haiku after an explicit Claude exchange rejects", async () => {
+  it("cleans up and does not retry or open browser login after Claude renewal rejects", async () => {
     let calls = 0;
     let isolatedRoot = "";
     let clock = Date.now();
-    const sources = {
-      keychain: async () => JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", scopes: ["user:inference"] } }),
-      file: async () => "",
-    };
     try {
       await expect(refreshClaudeCodeCredential(async (command) => {
         calls += 1;
         isolatedRoot = command.cwd;
-        expect(command.args).toEqual(["auth", "login"]);
-        throw new Error("fixture-exchange-rejected");
-      }, {}, () => clock, sources)).rejects.toThrow("fixture-exchange-rejected");
+        expect(command.args).toContain("haiku");
+        expect(command.args).not.toContain("login");
+        throw new Error("fixture-renewal-rejected");
+      }, {}, () => clock)).rejects.toThrow("fixture-renewal-rejected");
       expect(calls).toBe(1);
       await expect(readdir(isolatedRoot)).rejects.toBeDefined();
     } finally {
       clock += 16 * 60_000;
-      await refreshClaudeCodeCredential(async () => {}, {}, () => clock, noClaudeRefreshMaterial);
+      await refreshClaudeCodeCredential(async () => {}, {}, () => clock);
     }
   });
 });
@@ -4821,36 +4645,36 @@ describe("sanitized SDK logging sink", () => {
 });
 
 describe("usage credential refresh is single-flighted", () => {
-  it("collapses concurrent refreshes for one provider into a single subprocess", async () => {
+  it("collapses concurrent Claude refreshes into one normal CLI command", async () => {
     let spawns = 0;
-    let reads = 0;
+    let isolatedRoot = "";
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const runner = async (command: ClaudeCodeRefreshCommand): Promise<void> => {
       spawns += 1;
+      isolatedRoot = command.cwd;
       entered.resolve();
-      expect(command.args).toEqual(["auth", "login"]);
+      expect(command.args).toContain("haiku");
+      expect(command.args).toContain("--print");
+      expect(command.args).not.toContain("login");
+      expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
+      expect(command.env).not.toHaveProperty("CLAUDE_CODE_OAUTH_SCOPES");
       await release.promise;
     };
-    const sources = {
-      keychain: async () => {
-        reads += 1;
-        return JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", scopes: ["user:inference"] } });
-      },
-      file: async () => "",
-    };
-
-    const flights = Array.from({ length: 4 }, () => refreshClaudeCodeCredential(runner, {}, () => Date.now(), sources));
+    const flights = Array.from({ length: 4 }, () => refreshClaudeCodeCredential(runner, {
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "fixture-inherited-refresh",
+      CLAUDE_CODE_OAUTH_SCOPES: "user:inference",
+    }));
     try {
       await entered.promise;
       expect(spawns).toBe(1);
-      expect(reads).toBe(1);
     } finally {
       release.resolve();
       await Promise.all(flights);
     }
 
     expect(spawns).toBe(1);
+    await expect(readdir(isolatedRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("still allows a later non-overlapping refresh", async () => {
@@ -4859,16 +4683,19 @@ describe("usage credential refresh is single-flighted", () => {
       spawns += 1;
     };
 
-    await refreshClaudeCodeCredential(runner, {}, () => Date.now(), noClaudeRefreshMaterial);
-    await refreshClaudeCodeCredential(runner, {}, () => Date.now(), noClaudeRefreshMaterial);
+    await refreshClaudeCodeCredential(runner, {});
+    await refreshClaudeCodeCredential(runner, {});
 
     expect(spawns).toBe(2);
   });
 
   it("holds later recovery commands during the failure cooldown", async () => {
     let spawns = 0;
-    const failing = async (): Promise<void> => {
+    const isolatedRoots: string[] = [];
+    const failing = async (command: ClaudeCodeRefreshCommand): Promise<void> => {
       spawns += 1;
+      isolatedRoots.push(command.cwd);
+      expect(command.args).toContain("haiku");
       throw new Error("refresh failed");
     };
     let clock = 5_000_000;
@@ -4876,16 +4703,23 @@ describe("usage credential refresh is single-flighted", () => {
 
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await expect(refreshClaudeCodeCredential(failing, {}, now, noClaudeRefreshMaterial)).rejects.toThrow();
+        await expect(refreshClaudeCodeCredential(failing, {}, now)).rejects.toThrow();
       }
       expect(spawns).toBe(1);
 
-      clock += 16 * 60_000;
-      await expect(refreshClaudeCodeCredential(failing, {}, now, noClaudeRefreshMaterial)).rejects.toThrow();
+      clock += 15 * 60_000 - 1;
+      await expect(refreshClaudeCodeCredential(failing, {}, now)).rejects.toThrow("cooling down");
+      expect(spawns).toBe(1);
+
+      clock += 1;
+      await expect(refreshClaudeCodeCredential(failing, {}, now)).rejects.toThrow("refresh failed");
       expect(spawns).toBe(2);
+      for (const root of isolatedRoots) {
+        await expect(readdir(root)).rejects.toMatchObject({ code: "ENOENT" });
+      }
     } finally {
       clock += 16 * 60_000;
-      await refreshClaudeCodeCredential(async () => {}, {}, now, noClaudeRefreshMaterial);
+      await refreshClaudeCodeCredential(async () => {}, {}, now);
     }
   });
 
@@ -4907,8 +4741,8 @@ describe("usage credential refresh is single-flighted", () => {
     };
 
     const flights = [
-      refreshClaudeCodeCredential(claudeRunner, {}, () => Date.now(), noClaudeRefreshMaterial),
-      refreshClaudeCodeCredential(claudeRunner, {}, () => Date.now(), noClaudeRefreshMaterial),
+      refreshClaudeCodeCredential(claudeRunner, {}),
+      refreshClaudeCodeCredential(claudeRunner, {}),
       refreshKimiCodeCredential(kimiRunner),
       refreshKimiCodeCredential(kimiRunner),
     ];

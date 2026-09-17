@@ -19,7 +19,7 @@ import { Effect, Fiber, Schedule, type Duration, type ManagedRuntime } from "eff
 import { writeShellLog } from "./logging.js";
 import { displayInputFromFailure, renderDisplayInput } from "./renderer.js";
 import type { ProviderRequestRuntime } from "./runtime.js";
-import { createSchedulerFetchForActionSettings } from "./scheduler-fetch.js";
+import { createSchedulerFetchForActionSettings, createSchedulerMaintenanceForActionSettings } from "./scheduler-fetch.js";
 import {
   legacySeverityProfileForBalanceInput,
   legacySeverityProfileForUsageInput,
@@ -485,12 +485,15 @@ export class StreamDeckShell {
     action: StreamDeckActionPort,
     settings: NormalizedActionSettingsView,
   ): Promise<void> {
+    const fetchOptions = {
+      logSink: this.logSink,
+      readGlobalSettings: () => this.globalSettings.read(),
+      sourceFlightRuntime: this.providerRequestRuntime.sourceFlightRuntime,
+    };
+    const maintenance = createSchedulerMaintenanceForActionSettings(settings, fetchOptions);
     const output = this.scheduler.activate({
-      fetch: createSchedulerFetchForActionSettings(settings, {
-        logSink: this.logSink,
-        readGlobalSettings: () => this.globalSettings.read(),
-        sourceFlightRuntime: this.providerRequestRuntime.sourceFlightRuntime,
-      }),
+      fetch: createSchedulerFetchForActionSettings(settings, fetchOptions),
+      ...(maintenance === undefined ? {} : { maintenance }),
       instanceId: action.id,
       keyParts: settings.schedulerKeyParts,
       refreshIntervalSeconds: settings.refreshIntervalSeconds,

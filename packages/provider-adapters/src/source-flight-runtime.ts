@@ -15,6 +15,7 @@ import { Cause, Context, Deferred, Effect, ExecutionStrategy, Exit, Layer, Ref, 
 import type { AdapterFetchFailure } from "./effect-fetch.js";
 import { makeGovernorBackedAttemptContext, type GovernorBackedAttemptContext } from "./governed-request.js";
 import type { ClaudeCodeUsageResponse } from "./providers/usage/claude-code/index.js";
+import { makeClaudeCredentialMaintenance, type ClaudeCredentialMaintenanceSubscription } from "./providers/usage/claude-code/credential-maintenance.js";
 import type { KimiCodeUsageResponse } from "./providers/usage/kimi-code/index.js";
 
 /**
@@ -50,6 +51,7 @@ export interface AdapterSourceFlightRegistry<A, E, R> {
 const adapterSourceFlightCapabilityInternals = Symbol("adapter-source-flight-capability-internals");
 
 interface AdapterSourceFlightCapabilityInternals {
+  readonly maintainClaudeCredential: (subscription: ClaudeCredentialMaintenanceSubscription) => Effect.Effect<void, never, Scope.Scope>;
   readonly executeSource: <A, E, R>(
     identity: AdapterSourceRequestIdentity,
     operation: AdapterSourceFlightOperation<A, E, R>,
@@ -134,6 +136,14 @@ export function runClaudeCodeUsageSource(
   return capability[adapterSourceFlightCapabilityInternals].runClaudeCodeUsageSource(identity, operation);
 }
 
+/** Scoped scheduler-wait registration; no credential or HTTP result crosses back into the scheduler. */
+export function maintainClaudeCodeCredential(
+  capability: AdapterSourceFlightRuntimeCapability,
+  subscription: ClaudeCredentialMaintenanceSubscription,
+): Effect.Effect<void, never, Scope.Scope> {
+  return capability[adapterSourceFlightCapabilityInternals].maintainClaudeCredential(subscription);
+}
+
 /** Adapter-only Kimi bridge to the plugin-scoped homogeneous managed-usage registry. */
 export function runKimiCodeUsageSource(
   capability: AdapterSourceFlightRuntimeCapability,
@@ -181,6 +191,7 @@ export function makeAdapterSourceFlightRuntime(
 ): Effect.Effect<AdapterSourceFlightRuntime, never, Scope.Scope> {
   return Effect.gen(function* () {
     const lifetime = yield* Scope.make(ExecutionStrategy.sequential);
+    const maintainClaudeCredential = yield* makeClaudeCredentialMaintenance(lifetime);
     const claudeCodeUsageFlights = yield* Ref.make<
       ReadonlyMap<string, SourceFlight<ClaudeCodeUsageResponse, AdapterFetchFailure | GovernorBlocked>>
     >(
@@ -204,6 +215,7 @@ export function makeAdapterSourceFlightRuntime(
       governor,
       claudeCodeUsageRegistry,
       kimiCodeUsageRegistry,
+      maintainClaudeCredential,
     );
     yield* Effect.addFinalizer(() => runtime.shutdown());
     return runtime;
@@ -242,9 +254,11 @@ class RuntimeAdapterSourceFlightRuntime implements AdapterSourceFlightRuntime {
       AdapterFetchFailure | GovernorBlocked,
       PlatformHttpClient.HttpClient
     >,
+    maintainClaudeCredential: (subscription: ClaudeCredentialMaintenanceSubscription) => Effect.Effect<void, never, Scope.Scope>,
   ) {
     this.capability = {
       [adapterSourceFlightCapabilityInternals]: {
+        maintainClaudeCredential,
         executeSource: (identity, operation) => this.runSource(identity, operation),
         runClaudeCodeUsageSource: (identity, operation) => this.runClaudeCodeUsageSource(identity, operation),
         runKimiCodeUsageSource: (identity, operation) => this.runKimiCodeUsageSource(identity, operation),

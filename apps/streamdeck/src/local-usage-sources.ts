@@ -1,9 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, normalize } from "node:path";
-
-import { Option, Redacted, Schema } from "effect";
+import { join } from "node:path";
 
 import type { ResponseDiagnosticCode } from "@ai-workbench/errors";
 import type {
@@ -14,9 +12,8 @@ import type {
   UsageProviderLocalSourceReaders,
 } from "@ai-workbench/provider-adapters";
 
-import { ClaudeCodeRefreshPayloadSchema } from "./local-usage-sources.schema.js";
-
 const DEFAULT_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
+const CLAUDE_KEYCHAIN_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_CLAUDE_CODE_EXECUTABLE = join(homedir(), ".local", "bin", "claude");
 const DEFAULT_CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const DEFAULT_CODEX_SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
@@ -58,18 +55,6 @@ export type KimiCodeRefreshCommand = UsageCredentialRefreshCommand;
 export type KimiCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
 export type ClaudeCodeRefreshCommand = UsageCredentialRefreshCommand;
 export type ClaudeCodeRefreshCommandRunner = UsageCredentialRefreshCommandRunner;
-
-export interface ClaudeCodeRefreshSourceReaders {
-  readonly keychain: () => Promise<string>;
-  readonly file: (filePath: string) => Promise<string>;
-}
-
-const defaultClaudeCodeRefreshSourceReaders: ClaudeCodeRefreshSourceReaders = {
-  keychain: () => execFileText("security", ["find-generic-password", "-s", DEFAULT_CLAUDE_KEYCHAIN_SERVICE, "-w"]),
-  file: (filePath) => readFile(filePath, "utf8"),
-};
-const decodeClaudeCodeRefreshPayload = Schema.decodeUnknownOption(ClaudeCodeRefreshPayloadSchema);
-type ClaudeCodeRefreshMaterial = typeof ClaudeCodeRefreshPayloadSchema.Type.claudeAiOauth;
 
 /**
  * Vendor CLIs own credential renewal and storage. The plugin only reads existing local
@@ -269,11 +254,10 @@ export async function refreshClaudeCodeCredential(
   runCommand: ClaudeCodeRefreshCommandRunner = runUsageCredentialRefreshCommand,
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
   now: () => number = () => Date.now(),
-  readers: ClaudeCodeRefreshSourceReaders = defaultClaudeCodeRefreshSourceReaders,
 ): Promise<void> {
   return singleFlightRefresh(
     claudeCodeRefreshGate,
-    () => performClaudeCodeRefresh(runCommand, sourceEnvironment, readers),
+    () => performClaudeCodeRefresh(runCommand, sourceEnvironment),
     now,
   );
 }
@@ -281,27 +265,11 @@ export async function refreshClaudeCodeCredential(
 async function performClaudeCodeRefresh(
   runCommand: ClaudeCodeRefreshCommandRunner,
   sourceEnvironment: NodeJS.ProcessEnv,
-  readers: ClaudeCodeRefreshSourceReaders,
 ): Promise<void> {
   const refreshEnvironment = sanitizedUsageRefreshEnvironment(sourceEnvironment);
-  const material = await resolveClaudeCodeRefreshMaterial(readers, refreshEnvironment);
   const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-workbench-claude-refresh-"));
   try {
-    if (material !== undefined) {
-      await runCommand({
-        command: DEFAULT_CLAUDE_CODE_EXECUTABLE,
-        args: ["auth", "login"],
-        cwd: isolatedRoot,
-        env: {
-          ...refreshEnvironment,
-          CLAUDE_CODE_OAUTH_REFRESH_TOKEN: Redacted.value(material.refreshToken),
-          CLAUDE_CODE_OAUTH_SCOPES: material.scopes.join(" "),
-        },
-        timeoutMs: USAGE_CREDENTIAL_REFRESH_TIMEOUT_MS,
-        maxBufferBytes: USAGE_CREDENTIAL_REFRESH_MAX_BUFFER_BYTES,
-      });
-      return;
-    }
+    // Normal inference owns the CLI's refresh lock, credential reread and peer-rotation handling.
     await runCommand({
       command: DEFAULT_CLAUDE_CODE_EXECUTABLE,
       args: [
@@ -328,36 +296,6 @@ async function performClaudeCodeRefresh(
   } finally {
     await rm(isolatedRoot, { recursive: true, force: true });
   }
-}
-
-async function resolveClaudeCodeRefreshMaterial(
-  readers: ClaudeCodeRefreshSourceReaders,
-  environment: NodeJS.ProcessEnv,
-): Promise<ClaudeCodeRefreshMaterial | undefined> {
-  const configuredDir = environment.CLAUDE_CONFIG_DIR;
-  if (configuredDir !== undefined && (!isAbsolute(configuredDir) || configuredDir !== configuredDir.trim() || configuredDir !== normalize(configuredDir))) {
-    // The isolated child must resolve exactly the same directory as this read boundary.
-    return undefined;
-  }
-  let selected: ClaudeCodeRefreshMaterial | undefined;
-  const readCredentialFile = () => readers.file(claudeCodeCredentialFilePath(environment));
-  // Custom directories have separate vendor Keychain entries; never borrow the default login.
-  const sources = configuredDir === undefined ? [readers.keychain, readCredentialFile] : [readCredentialFile];
-  for (const read of sources) {
-    let raw: string;
-    try {
-      raw = await read();
-    } catch {
-      // An unavailable store may still have a usable peer. Never retain the raw read error.
-      continue;
-    }
-    const decoded = Option.getOrUndefined(decodeClaudeCodeRefreshPayload(parseJsonValue(raw)));
-    const candidate = decoded?.claudeAiOauth;
-    if (candidate !== undefined && (selected === undefined || (candidate.expiresAt ?? 0) > (selected.expiresAt ?? 0))) {
-      selected = candidate;
-    }
-  }
-  return selected;
 }
 
 /**
@@ -654,7 +592,7 @@ export async function readNewestCodexSessionSnapshot(
 
 async function execFileText(command: string, args: readonly string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(command, [...args], { encoding: "utf8" }, (error, stdout) => {
+    execFile(command, [...args], { encoding: "utf8", timeout: CLAUDE_KEYCHAIN_READ_TIMEOUT_MS }, (error, stdout) => {
       if (error !== null) {
         reject(error);
         return;

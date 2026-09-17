@@ -21,10 +21,11 @@ import {
   createSourceGatedUsageFetchEffect,
   createStatusProviderSourceFetchEffect,
   createUsageProviderSourceFetchEffect,
+  maintainClaudeCodeCredential,
   type AdapterSourceFlightRuntimeCapability,
   type UsageProviderLocalSourceReaders,
 } from "@ai-workbench/provider-adapters";
-import type { SchedulerEffectFetch } from "@ai-workbench/scheduler";
+import type { SchedulerEffectFetch, SchedulerMaintenance } from "@ai-workbench/scheduler";
 import type { NormalizedActionSettingsView } from "@ai-workbench/settings";
 import { Clock, Effect, Either } from "effect";
 
@@ -81,6 +82,28 @@ export function createSchedulerFetchForActionSettings(
   options: CreateSchedulerFetchOptions,
 ): SchedulerEffectFetch {
   return withFetchPathLogging(settings, options, createSchedulerFetchWithoutLogging(settings, options));
+}
+
+/** Claude maintenance observes actual scheduler waits without issuing a usage HTTP request. */
+export function createSchedulerMaintenanceForActionSettings(
+  settings: NormalizedActionSettingsView,
+  options: CreateSchedulerFetchOptions,
+): SchedulerMaintenance | undefined {
+  const source = (options.localSources ?? defaultLocalSources).claudeCode;
+  if (settings.familyId !== "usage" || settings.providerId !== "claude-code" || source?.refreshCredential === undefined) {
+    return undefined;
+  }
+  return ({ nextCheckAtEpochMs }) => maintainClaudeCodeCredential(options.sourceFlightRuntime, {
+    nextCheckAtEpochMs,
+    source,
+    onOutcome: (outcome) => options.logSink === undefined ? Effect.void : logEvent(options.logSink, {
+      eventName: "streamdeck-claude-credential-maintenance",
+      level: outcome === "renewed" || outcome === "armed" ? "info" : "warn",
+      message: outcome === "armed" ? "Claude early credential renewal armed for four minutes before expiry."
+        : outcome === "renewed" ? "Claude credential expiry advanced." : "Claude early credential renewal did not advance expiry.",
+      context: { actionFamilyId: "usage", providerId: "claude-code", reasonCode: outcome },
+    }),
+  });
 }
 
 /** Sanitized provider-fetch path logs: started, succeeded, failed (never payloads or secrets). */

@@ -1317,7 +1317,7 @@ describe("provider adapter source policy", () => {
     ];
 
     expect(providerModulePaths).toHaveLength(22);
-    expect(inventory.sourcePaths).toHaveLength(37);
+    expect(inventory.sourcePaths).toHaveLength(38);
     expect(statusProductionPaths).toEqual(expectedStatusProductionPaths);
     expect(discoveredStatusProductionPaths).toEqual(expectedStatusProductionPaths);
     expect(inventory.sourcePaths).toEqual(expect.arrayContaining([...inventory.runtimeRootPaths]));
@@ -1330,6 +1330,7 @@ describe("provider adapter source policy", () => {
       fileURLToPath(new URL("../src/providers/status/index.ts", import.meta.url)),
       governedRequestPath,
       sourceFlightRuntimePath,
+      fileURLToPath(new URL("../src/providers/usage/claude-code/credential-maintenance.ts", import.meta.url)),
       fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     ]));
     expect(inventory.unsupportedFindings).toEqual([]);

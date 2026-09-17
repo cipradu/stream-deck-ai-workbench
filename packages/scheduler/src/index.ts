@@ -9,7 +9,7 @@ import {
 import { createSanitizedFailure, type SanitizedFailure } from "@ai-workbench/errors";
 import type { HttpRetryClassificationInput } from "@ai-workbench/http";
 import type { ActionSettingsChangeClassification, GlobalSettingsChangeClassification } from "@ai-workbench/settings";
-import { Clock, Deferred, Duration, Effect, Fiber, Layer, ManagedRuntime, Random, Ref, Schedule } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, Layer, ManagedRuntime, Random, Ref, Schedule, type Scope } from "effect";
 
 import {
   JITTER_MAX_MULTIPLIER,
@@ -133,7 +133,13 @@ export interface SchedulerActivateInput {
   readonly keyParts: SchedulerKeyParts;
   readonly refreshIntervalSeconds: number;
   readonly fetch: SchedulerEffectFetch;
+  readonly maintenance?: SchedulerMaintenance;
 }
+
+/** Registers provider-owned maintenance for one actual scheduler wait; scope release must await owned cleanup. */
+export type SchedulerMaintenance = (input: {
+  readonly nextCheckAtEpochMs: number;
+}) => Effect.Effect<void, never, Scope.Scope>;
 
 export interface SchedulerDeactivateInput {
   readonly schedulerKey: SchedulerKey;
@@ -201,6 +207,7 @@ interface KeyEntry {
   readonly keyParts: SchedulerKeyParts;
   readonly activeInstances: Set<string>;
   readonly fetch: SchedulerEffectFetch;
+  readonly maintenance?: SchedulerMaintenance;
   readonly state: Ref.Ref<KeyPollState>;
   /** Fires the scheduler's output-change listener for THIS key. The poll fiber invokes it
    * (via {@link fireOutputChanged}, guarded) after each `Ref` write that changes this key's
@@ -321,6 +328,7 @@ class CentralScheduler implements Scheduler {
       keyParts: input.keyParts,
       activeInstances: new Set([input.instanceId]),
       fetch: input.fetch,
+      ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
       state: this.runtime.runSync(Ref.make<KeyPollState>(INITIAL_POLL_STATE)),
       // Reads the listener slot lazily so a listener registered before OR after activation both work.
       notifyOutputChanged: () => this.outputChangedListener?.(schedulerKey),
@@ -697,7 +705,9 @@ function pollWithBackoff(
       }
       const nextAttempt = attempt + 1;
       const delayMs = yield* computeBackoffDelay(entry, decision, nextAttempt, transientDriver, rateLimitDriver);
-      yield* Effect.sleep(Duration.millis(delayMs));
+      const state = yield* Ref.get(entry.state);
+      const nextCheck = state.activeBackoff?.nextRetryAtEpochMs ?? (yield* Clock.currentTimeMillis) + delayMs;
+      yield* waitWithMaintenance(entry, nextCheck, Effect.sleep(Duration.millis(delayMs)));
       yield* step(nextAttempt);
     });
   return step(0);
@@ -728,10 +738,10 @@ function healthyWait(entry: KeyEntry): Effect.Effect<void, never, never> {
     const delayMs = Math.round(Duration.toMillis(delay));
     const now = yield* Clock.currentTimeMillis;
     entry.nextHealthyPollAtEpochMs = now + delayMs;
-    const outcome = yield* Effect.race(
+    const outcome = yield* waitWithMaintenance(entry, entry.nextHealthyPollAtEpochMs, Effect.race(
       Effect.as(Effect.sleep(Duration.millis(delayMs)), "elapsed" as const),
       Deferred.await(wake),
-    );
+    ));
     if (outcome === "reschedule") {
       // Re-arm at the (already-updated) interval without polling; the recursion re-publishes the wake.
       yield* healthyWait(entry);
@@ -742,6 +752,19 @@ function healthyWait(entry: KeyEntry): Effect.Effect<void, never, never> {
       delete entry.healthyWake;
     }
   });
+}
+
+function waitWithMaintenance<A>(entry: KeyEntry, nextCheckAtEpochMs: number, wait: Effect.Effect<A>): Effect.Effect<A> {
+  if (entry.maintenance === undefined) {
+    return wait;
+  }
+  const maintenance = entry.maintenance;
+  return Effect.scoped(
+    Effect.suspend(() => maintenance({ nextCheckAtEpochMs })).pipe(
+      Effect.catchAllDefect(() => Effect.void),
+      Effect.zipRight(wait),
+    ),
+  );
 }
 
 /**

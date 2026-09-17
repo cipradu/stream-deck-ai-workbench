@@ -259,6 +259,91 @@ describe("@ai-workbench/scheduler public surface", () => {
   });
 });
 
+describe("scoped maintenance during actual scheduler waits", () => {
+  it("registers the actual jittered deadline and releases/replaces it on interval change and manual refresh", async () => {
+    const runtime = makeJitterRuntime(7);
+    const scheduler = createScheduler({ runtime });
+    const deadlines: number[] = [];
+    let releases = 0;
+    let polls = 0;
+    try {
+      scheduler.activate({
+        instanceId: "maintenance-instance", keyParts, refreshIntervalSeconds: 600,
+        fetch: okFetch((request) => { polls++; return snapshot({ fetchedAtEpochMs: request.startedAtEpochMs }); }),
+        maintenance: ({ nextCheckAtEpochMs }) => Effect.acquireRelease(
+          Effect.sync(() => { deadlines.push(nextCheckAtEpochMs); }),
+          () => Effect.sync(() => { releases++; }),
+        ),
+      });
+      await macrotask();
+      expect(deadlines).toEqual([scheduler.getOutput(key).nextHealthyPollAtEpochMs]);
+      expect(deadlines[0]).toBeGreaterThan(600_000);
+      await scheduler.handleActionSettingsChange({ schedulerKey: key, change: refreshPolicyOnlyChange(), refreshIntervalSeconds: 60 });
+      await macrotask();
+      expect(releases).toBe(1);
+      expect(deadlines[1]).toBe(scheduler.getOutput(key).nextHealthyPollAtEpochMs);
+      expect(deadlines[1]).toBeLessThanOrEqual(72_000);
+      expect(polls).toBe(1);
+      await scheduler.refresh(key);
+      await macrotask();
+      expect(polls).toBe(2);
+      expect(releases).toBe(2);
+      expect(deadlines).toHaveLength(3);
+    } finally { await scheduler.shutdown(); await runtime.dispose(); }
+    expect(releases).toBe(3);
+  });
+
+  it("registers the actual rate-limit deadline without clearing backoff or causing a request", async () => {
+    const runtime = makeTestRuntime();
+    const scheduler = createScheduler({ runtime });
+    const deadlines: number[] = [];
+    let polls = 0;
+    try {
+      scheduler.activate({
+        instanceId: "maintenance-instance", keyParts, refreshIntervalSeconds: 600,
+        fetch: () => Effect.sync(() => { polls++; }).pipe(Effect.zipRight(Effect.fail({ failure: failure("rate-limited"), retry: { retryAfterSeconds: 1200 } }))),
+        maintenance: ({ nextCheckAtEpochMs }) => Effect.sync(() => { deadlines.push(nextCheckAtEpochMs); }),
+      });
+      await macrotask();
+      expect(deadlines).toEqual([scheduler.getOutput(key).nextAllowedRetryAtEpochMs]);
+      expect(deadlines).toEqual([1_200_000]);
+      await runtime.runPromise(TestClock.adjust(Duration.minutes(10)));
+      await scheduler.refresh(key);
+      expect(polls).toBe(1);
+      expect(scheduler.getOutput(key).backoff?.attempt).toBe(1);
+    } finally { await scheduler.shutdown(); await runtime.dispose(); }
+  });
+
+  it("joins maintenance cleanup already pending from deactivation before shutdown finishes", async () => {
+    const runtime = makeTestRuntime();
+    const scheduler = createScheduler({ runtime });
+    const cleanupStarted = runtime.runSync(Deferred.make<void>());
+    const cleanupGate = runtime.runSync(Deferred.make<void>());
+    let closed = false;
+    try {
+      scheduler.activate({
+        instanceId: "maintenance-instance", keyParts, refreshIntervalSeconds: 600,
+        fetch: okFetch((request) => snapshot({ fetchedAtEpochMs: request.startedAtEpochMs })),
+        maintenance: () => Effect.acquireRelease(Effect.void, () =>
+          Deferred.succeed(cleanupStarted, undefined).pipe(Effect.zipRight(Deferred.await(cleanupGate)))),
+      });
+      await macrotask();
+      scheduler.deactivate({ instanceId: "maintenance-instance", schedulerKey: key });
+      await runtime.runPromise(Deferred.await(cleanupStarted));
+      const stopping = scheduler.shutdown().then(() => { closed = true; });
+      await macrotask();
+      expect(closed).toBe(false);
+      runtime.runSync(Deferred.succeed(cleanupGate, undefined));
+      await stopping;
+      expect(closed).toBe(true);
+    } finally {
+      runtime.runSync(Deferred.succeed(cleanupGate, undefined));
+      await scheduler.shutdown();
+      await runtime.dispose();
+    }
+  });
+});
+
 describe("healthy polling (jittered cadence under TestClock)", () => {
   it("(a) fires a healthy poll immediately and then at each (jittered) refresh interval", async () => {
     const runtime = makeTestRuntime();

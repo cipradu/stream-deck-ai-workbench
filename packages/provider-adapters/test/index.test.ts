@@ -1808,19 +1808,20 @@ describe("claude-code Effect-native usage adapter", () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
     let reads = 0;
     let refreshes = 0;
+    let credential: ClaudeCodeCredentialResult = { ok: true, accessToken: "fixture-expired-token", expiresAt: 1_000 };
     const runFetch = claudeCodeEffectSourceFetch(
       captured,
       respondJson(200, { five_hour: { utilization: 42 } }),
       async () => {
         reads += 1;
-        return reads === 1
-          ? { ok: true, accessToken: "fixture-expired-token", expiresAt: 1_000 }
-          : { ok: true, accessToken: "fixture-renewed-token", expiresAt: 10_000 };
+        return credential;
       },
       () => 2_000,
       undefined,
       async () => {
         refreshes += 1;
+        expect(captured).toHaveLength(0);
+        credential = { ok: true, accessToken: "fixture-renewed-token", expiresAt: 10_000 };
       },
     );
 
@@ -1829,8 +1830,28 @@ describe("claude-code Effect-native usage adapter", () => {
     expect(refreshes).toBe(1);
     expect(reads).toBe(2);
     expect(captured).toHaveLength(1);
+    expect(captured[0]?.headers["authorization"]).toBe("Bearer fixture-renewed-token");
     expect(result).toMatchObject({ ok: true, snapshot: { value: 42 } });
     expect(JSON.stringify(result)).not.toContain("fixture-expired-token");
+    expect(JSON.stringify(result)).not.toContain("fixture-renewed-token");
+  });
+
+  it.each(["expired", "401"] as const)("rechecks the clock after %s recovery before using the reread token", async (trigger) => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    let now = 2_000;
+    let refreshed = false;
+    const runFetch = claudeCodeEffectSourceFetch(
+      captured,
+      trigger === "401" ? respondJson(401, { error: "unauthorized" }) : respondJson(200, { five_hour: { utilization: 42 } }),
+      async () => ({ ok: true as const, accessToken: "fixture-access", expiresAt: refreshed ? 3_000 : trigger === "401" ? 10_000 : 1_000 }),
+      () => now,
+      undefined,
+      async () => { refreshed = true; now = 4_000; },
+    );
+    const result = await runFetch(usageRequest("claude-code", "five-hour"));
+    expect(refreshed).toBe(true);
+    expect(captured).toHaveLength(trigger === "401" ? 1 : 0);
+    expect(result).toMatchObject({ ok: false, failure: { category: "unauthorized-expired" } });
   });
 
   it("fails fast with unauthorized-expired when the re-read token is ALSO expired, issuing no HTTP request", async () => {

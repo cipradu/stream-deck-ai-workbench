@@ -29,6 +29,7 @@ export {
   AdapterSourceFlightRuntimeLive,
   advanceAdapterSourceCredentialGeneration,
   makeAdapterSourceFlightRuntimeLive,
+  maintainClaudeCodeCredential,
   shutdownAdapterSourceFlightRuntime,
 } from "./source-flight-runtime.js";
 export type { AdapterSourceFlightRuntimeTestObserver, AdapterSourceRequestIdentity } from "./source-flight-runtime.js";
