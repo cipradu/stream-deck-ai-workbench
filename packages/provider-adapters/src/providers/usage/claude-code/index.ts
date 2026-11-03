@@ -37,11 +37,19 @@ const ClaudeCodeUsageResponseSchema = Schema.Struct({
   // utilization) degrades THAT window to per-window no-data in `usageWindowForResponse` instead of
   // failing the WHOLE decode (which briefly blanked the key during credit-toggling). The 5h/7d happy
   // path — a finite numeric utilization — is unchanged.
+  //
+  // `five_hour` itself is also nullable. Owner-directed: the endpoint was observed returning
+  // `"five_hour": null` (logged as received type null from 2026-10-31), and the owner treats an
+  // explicit null as "no 5-hour limit", projected as zero usage in `usageWindowForResponse`. It
+  // must never fail the whole decode and blank the 7-day/Fable keys. Why the vendor sends null is
+  // unverified. `seven_day` stays strict: a null `seven_day` has not been observed or specified.
   five_hour: Schema.optional(
-    Schema.Struct({
-      utilization: Schema.optional(Schema.NullOr(Schema.Number)),
-      resets_at: Schema.optional(Schema.NullOr(Schema.String)),
-    }),
+    Schema.NullOr(
+      Schema.Struct({
+        utilization: Schema.optional(Schema.NullOr(Schema.Number)),
+        resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ),
   ),
   seven_day: Schema.optional(
     Schema.Struct({
@@ -73,7 +81,8 @@ const classifyClaudeCodeUsageResponse: JsonResponseClassifier = (response) => {
   }
 
   const fiveHour = response.five_hour;
-  if (hasOwn(response, "five_hour") && !isJsonObject(fiveHour)) {
+  // An explicit null is the owner-directed "no 5-hour limit" state, not structural drift.
+  if (hasOwn(response, "five_hour") && fiveHour !== null && !isJsonObject(fiveHour)) {
     return "claude-code-usage-five-hour-not-object";
   }
   if (isJsonObject(fiveHour)) {
@@ -501,6 +510,14 @@ function usageWindowForResponse(
   response: ClaudeCodeUsageResponse,
   window: UsageWindowId,
 ): { readonly value: number; readonly resetsAtEpochMs?: number } | undefined {
+  // Owner-directed exception to "no defaulted 0": an EXPLICIT `five_hour: null` is treated as no
+  // 5-hour limit, so the 5-hour key reads zero usage (100% left) with no reset countdown. The vendor
+  // meaning of null is unverified. Only this exact wire state does it; a missing `five_hour` key
+  // stays no-data below.
+  if (window === "five-hour" && response.five_hour === null) {
+    return { value: 0 };
+  }
+
   const rawWindow = window === "five-hour" ? response.five_hour : response.seven_day;
   // A missing window, or a missing/null/non-finite `utilization` (now tolerated by the schema), is
   // per-window no-data — never a defaulted 0, and never a whole-response failure. The typeof guard

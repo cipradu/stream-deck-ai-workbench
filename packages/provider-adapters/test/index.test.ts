@@ -2244,6 +2244,66 @@ describe("claude-code Effect-native usage adapter", () => {
     }
   });
 
+  it("optional five_hour: an explicit null window (plan without a 5-hour limit) reads as zero usage with no reset while seven_day and Fable still decode from the same response", async () => {
+    // Owner-directed: from 2026-10-31 the endpoint returned `"five_hour": null`, which used to fail
+    // the WHOLE decode (ValidationDrift) and blank every Claude key. The vendor meaning of null is
+    // unverified; it is treated as no 5-hour limit, so the 5-hour key reads 0 used (100% left) with
+    // no countdown and its siblings still work.
+    const body = {
+      five_hour: null,
+      seven_day: { utilization: 33, resets_at: "2026-07-14T00:00:00Z" },
+      limits: claudeCodeLimitsWithFable(12, null),
+    };
+    const runFetch = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, body),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+
+    const fiveHour = await runFetch(usageRequest("claude-code", "five-hour"));
+    expect(fiveHour).toMatchObject({
+      ok: true,
+      snapshot: {
+        metricKind: "usage-percent",
+        coverage: { kind: "rolling-window", window: "five-hour" },
+        value: 0,
+      },
+    });
+    if (fiveHour.ok) {
+      expect(fiveHour.snapshot).not.toHaveProperty("resetsAtEpochMs");
+    }
+    expect(await runFetch(usageRequest("claude-code", "seven-day"))).toMatchObject({
+      ok: true,
+      snapshot: { coverage: { kind: "rolling-window", window: "seven-day" }, value: 33 },
+    });
+    expect(await runFetch(usageRequest("claude-code", "fable"))).toMatchObject({
+      ok: true,
+      snapshot: { coverage: { kind: "rolling-window", window: "fable" }, value: 12 },
+    });
+  });
+
+  it("optional five_hour: only an explicit null reads as zero; an omitted five_hour key stays per-window no-data and a null seven_day stays strict drift", async () => {
+    const omitted = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, { seven_day: { utilization: 33, resets_at: "2026-07-14T00:00:00Z" } }),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+    expect(await omitted(usageRequest("claude-code", "five-hour"))).toMatchObject({
+      ok: false,
+      failure: { category: "no-data-yet", provider: { reasonCode: "usage-claude-window-not-returned" } },
+    });
+
+    const nullSevenDay = claudeCodeEffectSourceFetch(
+      [],
+      respondJson(200, { five_hour: null, seven_day: null }),
+      async () => ({ ok: true, accessToken: CLAUDE_CODE_ACCESS_TOKEN }),
+    );
+    expect(await nullSevenDay(usageRequest("claude-code", "five-hour"))).toMatchObject({
+      ok: false,
+      failure: { category: "validation-drift", provider: { reasonCode: "claude-code-usage-seven-day-not-object" } },
+    });
+  });
+
   it("isolation: a non-array limits value (null, string, number) fails only the Fable path to no-data while five_hour still decodes", async () => {
     // `limits` is decoded as Schema.Unknown, so any non-array value must NOT reject the shared response
     // decode: the Fable path fails soft to no-data and the sibling five-hour window still resolves.
