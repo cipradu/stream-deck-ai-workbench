@@ -357,11 +357,12 @@ describe("provider request governor production adapter route", () => {
                 {
                   starting_at: "2026-07-01T00:00:00Z",
                   ending_at: "2026-07-02T00:00:00Z",
-                  results: [{ amount: "1", currency: "USD" }],
+                  cost: { amount: "1.000000", currency: "USD" },
                 },
               ],
               has_more: true,
               next_page: "next",
+              data_refreshed_at: "2026-07-03T00:00:00Z",
             },
           },
           {
@@ -370,11 +371,12 @@ describe("provider request governor production adapter route", () => {
                 {
                   starting_at: "2026-07-02T00:00:00Z",
                   ending_at: "2026-07-03T00:00:00Z",
-                  results: [{ amount: "1", currency: "USD" }],
+                  cost: { amount: "1.000000", currency: "USD" },
                 },
               ],
               has_more: false,
               next_page: null,
+              data_refreshed_at: "2026-07-03T00:00:00Z",
             },
           },
         ],

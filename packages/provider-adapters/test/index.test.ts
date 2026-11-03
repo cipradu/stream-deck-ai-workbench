@@ -308,20 +308,22 @@ describe("provider request-helper census", () => {
 
 const ANTHROPIC_SECRET = "sk-ant-fixture-secret-value";
 
-function anthropicCostReportBody(overrides?: Record<string, unknown>): unknown {
+// Shape of `GET /v1/organizations/analytics/cost` with no `group_by` or `time_bucket_width`: one row for
+// the whole range, `cost.amount` a six-decimal string in cents (post-discount, pre-credit), plus the
+// vendor's processed-through time. Fabricated values only.
+function anthropicCostBody(overrides?: Record<string, unknown>): unknown {
   return {
     data: [
       {
         starting_at: "2026-07-01T00:00:00Z",
-        ending_at: "2026-07-02T00:00:00Z",
-        results: [
-          { amount: "125", currency: "USD" },
-          { amount: "50", currency: "USD" },
-        ],
+        ending_at: "2026-07-15T06:00:00Z",
+        group: { model: null, workspace_id: null },
+        cost: { amount: "175.000000", list_amount: "200.000000", currency: "USD", requests: 4 },
       },
     ],
     has_more: false,
     next_page: null,
+    data_refreshed_at: "2026-07-15T05:30:00Z",
     ...(overrides ?? {}),
   };
 }
@@ -631,17 +633,15 @@ describe("anthropic-api Effect-native adapter", () => {
         }).pipe(Effect.zipRight(operation)),
       reportRateLimit: () => Effect.void,
     } satisfies ProviderAdapterAttemptContext;
-    const response = anthropicCostReportBody({
+    const response = anthropicCostBody({
       data: [
         {
           starting_at: "2026-08-01T00:00:00Z",
           ending_at: "2026-08-02T00:00:00Z",
-          results: [
-            { amount: "125", currency: "USD" },
-            { amount: "50", currency: "USD" },
-          ],
+          cost: { amount: "175.000000", list_amount: "175.000000", currency: "USD", requests: 2 },
         },
       ],
+      data_refreshed_at: "2026-08-02T00:00:00Z",
     });
     const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, response), attemptContext, nowMs);
 
@@ -662,7 +662,7 @@ describe("anthropic-api Effect-native adapter", () => {
 
   it("fetches and decodes the vendor body at the source via the central one-read decoder into a normalized snapshot", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
-    const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostReportBody()));
+    const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostBody()));
 
     const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
 
@@ -676,17 +676,199 @@ describe("anthropic-api Effect-native adapter", () => {
       },
     });
     expect(captured).toHaveLength(1);
-    expect(captured[0]?.url).toContain("/v1/organizations/cost_report");
+    expect(captured[0]?.url).toContain("/v1/organizations/analytics/cost");
+    expect(captured[0]?.url).not.toContain("cost_report");
+    // Month-to-date asks for one summed row: only the month start is sent, with no legacy bucket width,
+    // no explicit end (the vendor ends the range at the current hour) and no grouping.
+    expect(captured[0]!.urlParams).toEqual([["starting_at", "2026-07-01T00:00:00Z"]]);
   });
 
   it("carries the raw key in the x-api-key header via the single Redacted.value unwrap", async () => {
     const captured: HttpClientRequest.HttpClientRequest[] = [];
-    const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostReportBody()));
+    const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, anthropicCostBody()));
 
     await runFetch(balanceRequest("anthropic-api", "month-to-date"));
 
     expect(PlatformHeaders.get(captured[0]!.headers, "x-api-key")).toStrictEqual(Option.some(ANTHROPIC_SECRET));
     expect(PlatformHeaders.get(captured[0]!.headers, "anthropic-version")).toStrictEqual(Option.some("2023-06-01"));
+    expect(PlatformHeaders.get(captured[0]!.headers, "anthropic-beta")).toStrictEqual(
+      Option.some("analytics-usage-cost-2026-08-24"),
+    );
+  });
+
+  it("sums cost.amount only: a six-decimal cents string becomes dollars and list_amount or other fields are ignored", async () => {
+    const body = anthropicCostBody({
+      data: [
+        {
+          starting_at: "2026-07-01T00:00:00Z",
+          ending_at: "2026-07-15T06:00:00Z",
+          group: { model: null },
+          cost: { amount: "41280.000000", list_amount: "99999999.000000", currency: "USD", requests: null },
+        },
+      ],
+    });
+    const runFetch = anthropicEffectSourceFetch([], respondJson(200, body));
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: { providerId: "anthropic-api", metricKind: "current-month-spend", value: 412.8 },
+    });
+  });
+
+  it("bounds data coverage by the earlier of the vendor's processed-through time and the row's exclusive end", async () => {
+    const refreshedFirst = anthropicEffectSourceFetch(
+      [],
+      respondJson(200, anthropicCostBody({ data_refreshed_at: "2026-07-15T02:00:00Z" })),
+    );
+    expect(await refreshedFirst(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { dataThroughEpochMs: Date.UTC(2026, 6, 15, 2) },
+    });
+
+    const rowEndFirst = anthropicEffectSourceFetch(
+      [],
+      respondJson(200, anthropicCostBody({ data_refreshed_at: "2026-07-15T09:00:00Z" })),
+    );
+    expect(await rowEndFirst(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { dataThroughEpochMs: Date.UTC(2026, 6, 15, 6) },
+    });
+  });
+
+  it("reads an empty response that carries a refresh time as a genuine month without cost", async () => {
+    const runFetch = anthropicEffectSourceFetch(
+      [],
+      respondJson(200, anthropicCostBody({ data: [], data_refreshed_at: "2026-07-15T05:30:00Z" })),
+    );
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({
+      ok: true,
+      snapshot: { providerId: "anthropic-api", value: 0, dataThroughEpochMs: Date.UTC(2026, 6, 15, 5, 30) },
+    });
+  });
+
+  it.each([
+    { name: "a null refresh time", body: anthropicCostBody({ data: [], data_refreshed_at: null }) },
+    { name: "an omitted refresh time", body: { data: [], has_more: false, next_page: null } },
+  ])(
+    "reads an empty response with $name as a successful zero through the month start, never a no-data failure that would keep last month's value",
+    async ({ body }) => {
+      // The scheduler retains the previous snapshot after any failed refresh and shows it as stale, which
+      // across a month boundary would display last month's total as this month's. A successful zero with a
+      // coverage end at the month start lets the "thru <date>" marker show how far the data extends.
+      const nowMs = Date.UTC(2026, 6, 15);
+      const captured: HttpClientRequest.HttpClientRequest[] = [];
+      const runFetch = anthropicEffectSourceFetch(captured, respondJson(200, body), undefined, nowMs);
+
+      const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+      expect(result).toMatchObject({
+        ok: true,
+        snapshot: { providerId: "anthropic-api", value: 0, dataThroughEpochMs: monthStartEpochMs(nowMs) },
+      });
+      expect(result).not.toHaveProperty("failure");
+      expect(captured).toHaveLength(1);
+    },
+  );
+
+  it("keeps an honest coverage end when the vendor has only processed data from before the month started", async () => {
+    const runFetch = anthropicEffectSourceFetch(
+      [],
+      respondJson(200, anthropicCostBody({ data: [], data_refreshed_at: "2026-06-30T23:00:00Z" })),
+    );
+
+    expect(await runFetch(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { value: 0, dataThroughEpochMs: Date.UTC(2026, 5, 30, 23) },
+    });
+  });
+
+  it("sums every row of a response", async () => {
+    const runFetch = anthropicEffectSourceFetch(
+      [],
+      respondJson(
+        200,
+        anthropicCostBody({
+          data: [
+            { ending_at: "2026-07-15T06:00:00Z", cost: { amount: "125.000000", currency: "USD" } },
+            { ending_at: "2026-07-15T06:00:00Z", cost: { amount: "50.000000", currency: "USD" } },
+          ],
+        }),
+      ),
+    );
+
+    expect(await runFetch(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { value: 1.75 },
+    });
+  });
+
+  it("sums rows across pages and takes the refresh time from the first page that carries one", async () => {
+    const captured: HttpClientRequest.HttpClientRequest[] = [];
+    const runFetch = anthropicEffectSourceFetch(
+      captured,
+      respondJsonSequence([
+        {
+          body: anthropicCostBody({
+            data: [{ ending_at: "2026-07-15T06:00:00Z", cost: { amount: "100.000000", currency: "USD" } }],
+            has_more: true,
+            next_page: "cursor-2",
+            data_refreshed_at: null,
+          }),
+        },
+        {
+          body: anthropicCostBody({
+            data: [{ ending_at: "2026-07-15T06:00:00Z", cost: { amount: "75.000000", currency: "USD" } }],
+            data_refreshed_at: "2026-07-15T03:00:00Z",
+          }),
+        },
+      ]),
+    );
+
+    expect(await runFetch(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { value: 1.75, dataThroughEpochMs: Date.UTC(2026, 6, 15, 3) },
+    });
+    expect(captured).toHaveLength(2);
+    expect(captured[1]!.urlParams).toContainEqual(["page", "cursor-2"]);
+    expect(captured[1]!.urlParams).toContainEqual(["starting_at", "2026-07-01T00:00:00Z"]);
+  });
+
+  it.each([
+    { name: "a later page that is earlier", refreshes: ["2026-07-15T04:00:00Z", "2026-07-15T02:00:00Z"] },
+    { name: "a later page that is later", refreshes: ["2026-07-15T02:00:00Z", "2026-07-15T04:00:00Z"] },
+  ])("never claims more coverage than the earliest page when refresh times differ across pages: $name", async ({ refreshes }) => {
+    const row = { ending_at: "2026-07-15T06:00:00Z", cost: { amount: "100.000000", currency: "USD" } };
+    const runFetch = anthropicEffectSourceFetch(
+      [],
+      respondJsonSequence([
+        {
+          body: anthropicCostBody({ data: [row], has_more: true, next_page: "cursor-2", data_refreshed_at: refreshes[0] }),
+        },
+        { body: anthropicCostBody({ data: [row], data_refreshed_at: refreshes[1] }) },
+      ]),
+    );
+
+    expect(await runFetch(balanceRequest("anthropic-api", "month-to-date"))).toMatchObject({
+      ok: true,
+      snapshot: { value: 2, dataThroughEpochMs: Date.UTC(2026, 6, 15, 2) },
+    });
+  });
+
+  it("rejects a row without a cost object as validation drift instead of guessing a value", async () => {
+    const runFetch = anthropicEffectSourceFetch(
+      [],
+      respondJson(200, anthropicCostBody({ data: [{ starting_at: "2026-07-01T00:00:00Z" }] })),
+    );
+
+    const result = await runFetch(balanceRequest("anthropic-api", "month-to-date"));
+
+    expect(result).toMatchObject({ ok: false, failure: { category: "validation-drift" } });
+    expect(result).not.toHaveProperty("snapshot");
   });
 
   it("keeps the credential redacted and never leaks the raw secret in a sanitized failure", async () => {
@@ -747,7 +929,7 @@ describe("anthropic-api Effect-native adapter", () => {
     const pagedThenFail: FakeExecute = (request) => {
       page += 1;
       return page === 1
-        ? respondJson(200, anthropicCostReportBody({ has_more: true, next_page: "cursor-2" }))(request)
+        ? respondJson(200, anthropicCostBody({ has_more: true, next_page: "cursor-2" }))(request)
         : respondJson(503, { error: "service unavailable" })(request);
     };
     const runFetch = anthropicEffectSourceFetch(captured, pagedThenFail);
@@ -4269,14 +4451,13 @@ describe("docs-shaped Balance response normalization", () => {
           {
             starting_at: "2026-07-01T00:00:00Z",
             ending_at: "2026-07-02T00:00:00Z",
-            results: [
-              { amount: "125", currency: "USD" },
-              { amount: "50", currency: "USD" },
-            ],
+            group: { model: null },
+            cost: { amount: "175.000000", list_amount: "175.000000", currency: "USD", requests: 3 },
           },
         ],
         has_more: false,
         next_page: null,
+        data_refreshed_at: "2026-07-02T00:00:00Z",
       },
       metricKind: "current-month-spend",
       coverageKind: "month-to-date",
@@ -4752,8 +4933,8 @@ describe("migrated multi-call Balance adapters", () => {
     await anthropicEffectSourceFetch(
       [],
       respondJsonSequence([
-        { body: anthropicCostReportBody({ has_more: true, next_page: "cursor-2" }) },
-        { body: anthropicCostReportBody() },
+        { body: anthropicCostBody({ has_more: true, next_page: "cursor-2" }) },
+        { body: anthropicCostBody() },
       ]),
       attemptContext,
     )(balanceRequest("anthropic-api", "month-to-date"));
